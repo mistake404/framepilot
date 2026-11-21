@@ -3,12 +3,25 @@ import SwiftUI
 struct ContentView: View {
     @StateObject private var engine = SpatialCameraEngine()
     @State private var showPackSheet = false
+    @State private var showExposureSlider = false
 
     var body: some View {
         ZStack {
-            // Full-screen 60fps AR / LiDAR camera preview
-            ARCameraView(session: engine.arSession)
-                .ignoresSafeArea()
+            // Native Apple Pro Camera preview with tap-to-focus
+            ProCameraPreviewView(session: engine.captureSession) { devicePoint, screenPoint in
+                engine.focus(at: devicePoint, screenPoint: screenPoint)
+            }
+            .ignoresSafeArea()
+
+            // Tap-to-focus yellow reticle
+            if let focusPoint = engine.focusIndicatorPoint {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(Color.yellow, lineWidth: 1.8)
+                    .frame(width: 68, height: 68)
+                    .position(focusPoint)
+                    .allowsHitTesting(false)
+                    .transition(.scale.combined(with: .opacity))
+            }
 
             // Isolated high-frequency HUD (does not re-render ContentView)
             DirectorHUDView(
@@ -37,9 +50,82 @@ struct ContentView: View {
                         .padding(.horizontal, 14)
                         .padding(.vertical, 8)
                         .background(Capsule().fill(Color.black.opacity(0.75)))
-                        .padding(.bottom, 10)
+                        .padding(.bottom, 8)
                         .transition(.opacity)
                 }
+
+                // Exposure (EV) slider when toggled
+                if showExposureSlider {
+                    HStack(spacing: 10) {
+                        Image(systemName: "sun.min")
+                            .font(.system(size: 12))
+                            .foregroundColor(.white.opacity(0.8))
+
+                        Slider(
+                            value: Binding(
+                                get: { Double(engine.exposureBias) },
+                                set: { engine.setExposureBias(Float($0)) }
+                            ),
+                            in: -2.0...2.0,
+                            step: 0.1
+                        )
+                        .tint(.yellow)
+
+                        Text(String(format: "%+.1f EV", engine.exposureBias))
+                            .font(.system(size: 11, weight: .bold, design: .monospaced))
+                            .foregroundColor(.yellow)
+                            .frame(width: 52, alignment: .trailing)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7)
+                    .background(Capsule().fill(Color.black.opacity(0.68)))
+                    .padding(.horizontal, 28)
+                    .padding(.bottom, 8)
+                }
+
+                // Lens selector (0.5x / 1x / 2x / 5x) + EV toggle
+                HStack(spacing: 10) {
+                    if engine.availableLenses.count > 1 {
+                        HStack(spacing: 4) {
+                            ForEach(engine.availableLenses, id: \.self) { lens in
+                                let isSelected = abs(engine.activeLens - lens) < 0.1
+                                let label = lens == 0.5 ? ".5" : "\(Int(lens))"
+                                Button {
+                                    engine.setLens(lens)
+                                } label: {
+                                    Text(isSelected ? "\(label)x" : label)
+                                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                        .foregroundColor(isSelected ? .yellow : .white)
+                                        .frame(width: 34, height: 28)
+                                        .background(
+                                            Circle().fill(isSelected ? Color.black.opacity(0.75) : Color.clear)
+                                        )
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(Color.black.opacity(0.45)))
+                    }
+
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            showExposureSlider.toggle()
+                        }
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "plusminus.circle")
+                                .font(.system(size: 12, weight: .semibold))
+                            Text(engine.exposureBias == 0 ? "EV" : String(format: "%+.1f", engine.exposureBias))
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        }
+                        .foregroundColor(showExposureSlider || engine.exposureBias != 0 ? .yellow : .white)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(Color.black.opacity(0.48)))
+                    }
+                }
+                .padding(.bottom, 10)
 
                 if !engine.selectedPack.shots.isEmpty {
                     ShotChecklistBar(

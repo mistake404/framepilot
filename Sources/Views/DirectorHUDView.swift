@@ -245,6 +245,7 @@ private struct CoachingBanner: View {
 
             if let shot = activeShot {
                 HStack(spacing: 10) {
+                    Label(shot.lensLabel, systemImage: "camera.aperture")
                     Label(shot.distanceLabel, systemImage: "ruler")
                     Label(shot.pitchLabel, systemImage: "angle")
                     Label(shot.preferredMode.rawValue, systemImage: shot.preferredMode == .video ? "video.fill" : "camera.fill")

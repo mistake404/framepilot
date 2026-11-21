@@ -1,11 +1,7 @@
 import Foundation
 import Combine
-import ARKit
-import CoreMotion
-import CoreImage
-import ImageIO
-import Metal
 import AVFoundation
+import CoreMotion
 import Photos
 import Vision
 import UIKit
@@ -15,19 +11,26 @@ final class HUDTelemetryStore: ObservableObject {
     @Published var telemetry = CameraTelemetry()
 }
 
-final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
-    let arSession = ARSession()
+final class SpatialCameraEngine: NSObject, ObservableObject {
+    let captureSession = AVCaptureSession()
     let hudStore = HUDTelemetryStore()
 
     @Published var selectedPack: ScenePack = ScenePack.presets[0]
     @Published var activeShotIndex: Int = 0
     @Published var completedShotIds: Set<String> = []
-    @Published var captureMode: CaptureMode = .video
+    @Published var captureMode: CaptureMode = .photo
     @Published var isRecording: Bool = false
     @Published var recordingSeconds: Int = 0
     @Published var statusToast: String?
     @Published var overlayMode: OverlayMode = .thirds
+    @Published var availableLenses: [Double] = [1.0]
+    @Published var activeLens: Double = 1.0
+    @Published var exposureBias: Float = 0.0
+    @Published var focusIndicatorPoint: CGPoint?
 
+    private let sessionQueue = DispatchQueue(label: "com.framepilot.session", qos: .userInitiated)
+    private let depthQueue = DispatchQueue(label: "com.framepilot.depth", qos: .utility)
+    private let visionQueue = DispatchQueue(label: "com.framepilot.vision", qos: .utility)
     private let motionManager = CMMotionManager()
     private let motionQueue: OperationQueue = {
         let q = OperationQueue()
@@ -36,49 +39,35 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
         q.maxConcurrentOperationCount = 1
         return q
     }()
-    private let writerQueue = DispatchQueue(label: "com.framepilot.videoWriter", qos: .userInitiated)
-    private let visionQueue = DispatchQueue(label: "com.framepilot.vision", qos: .utility)
     private let sensorLock = NSLock()
 
-    // Metal-backed CIContext for GPU-accelerated photo & video frame rendering
-    private let ciContext: CIContext = {
-        if let device = MTLCreateSystemDefaultDevice() {
-            return CIContext(mtlDevice: device, options: [.cacheIntermediates: false])
-        }
-        return CIContext(options: [.cacheIntermediates: false])
-    }()
-
-    private var assetWriter: AVAssetWriter?
-    private var videoInput: AVAssetWriterInput?
-    private var audioInput: AVAssetWriterInput?
-    private var pixelBufferAdaptor: AVAssetWriterInputPixelBufferAdaptor?
-    private var recordingURL: URL?
-    private var recordingStartTimestamp: CMTime?
-    private var recordingTimer: Timer?
-    private var isEncodingFrame: Bool = false
-    private var isRecordingFlag: Bool = false
+    private var videoDevice: AVCaptureDevice?
+    private var wideZoomFactor: Double = 1.0
+    private let photoOutput = AVCapturePhotoOutput()
+    private let movieOutput = AVCaptureMovieFileOutput()
+    private let videoDataOutput = AVCaptureVideoDataOutput()
+    private let depthDataOutput = AVCaptureDepthDataOutput()
+    private var isConfigured = false
 
     // Smoothed sensor state (protected by sensorLock)
     private var smoothedPitchDegrees: Double = 0
     private var smoothedRollDegrees: Double = 0
     private var smoothedMotionSpeed: Double = 0
     private var smoothedDistanceMeters: Double?
-    private var hasMotionSample: Bool = false
-
-    // Vision subject detection state
-    private var lastVisionUpdate: TimeInterval = 0
-    private var isAnalyzingVision: Bool = false
     private var latestFaceRect: CGRect?
+    private var hasMotionSample: Bool = false
+    private var isRecordingFlag: Bool = false
+    private var currentTargetShot: ShotTemplate?
 
-    private var lastHUDUpdate: TimeInterval = 0
+    private var lastVisionTimestamp: TimeInterval = 0
+    private var isAnalyzingVision: Bool = false
     private var lastAdviceUpdate: TimeInterval = 0
     private var cachedAdvice: CoachingAdvice = .idle
-    private var cachedLighting: LightingCondition = .balanced
     private var cachedDetectedShot: ShotKind = .medium
     private var wasLocked: Bool = false
 
-    // Thread-safe snapshot of activeShot for ARSession callback
-    private var currentTargetShot: ShotTemplate?
+    private var hudTimer: DispatchSourceTimer?
+    private var recordingTimer: Timer?
 
     private let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
     private let notificationFeedback = UINotificationFeedbackGenerator()
@@ -92,48 +81,276 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
 
     override init() {
         super.init()
-        arSession.delegate = self
         currentTargetShot = activeShot
+        if let first = activeShot {
+            captureMode = first.preferredMode
+        }
     }
 
     func start() {
-        let config = ARWorldTrackingConfiguration()
-        config.isLightEstimationEnabled = true
-        config.isAutoFocusEnabled = true
-        config.worldAlignment = .gravity
-        config.environmentTexturing = .none
-        config.planeDetection = []
-        config.providesAudioData = true
-
-        // Prefer 60fps video format for native-like viewfinder fluidity
-        if let best60fps = Self.selectOptimalVideoFormat() {
-            config.videoFormat = best60fps
-        }
-
-        var lidarAvailable = false
-        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
-            config.frameSemantics.insert(.smoothedSceneDepth)
-            lidarAvailable = true
-        } else if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
-            config.frameSemantics.insert(.sceneDepth)
-            lidarAvailable = true
-        }
-
-        DispatchQueue.main.async {
-            self.hudStore.telemetry.hasLidarSupport = lidarAvailable
-        }
-
-        arSession.run(config, options: [.resetTracking, .removeExistingAnchors])
-        startMotionUpdates()
         impactFeedback.prepare()
+        startMotionUpdates()
+        startHUDLoop()
+
+        AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+            guard let self else { return }
+            guard granted else {
+                self.showToast("Permite acesso à câmara nas Definições")
+                return
+            }
+            AVCaptureDevice.requestAccess(for: .audio) { _ in }
+            self.sessionQueue.async {
+                if !self.isConfigured {
+                    self.configureSession()
+                }
+                if !self.captureSession.isRunning {
+                    self.captureSession.startRunning()
+                }
+            }
+        }
     }
 
     func stop() {
-        if isRecording {
-            stopVideoRecording()
-        }
-        arSession.pause()
+        hudTimer?.cancel()
+        hudTimer = nil
         motionManager.stopDeviceMotionUpdates()
+
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            if self.movieOutput.isRecording {
+                self.movieOutput.stopRecording()
+            }
+            if self.captureSession.isRunning {
+                self.captureSession.stopRunning()
+            }
+        }
+    }
+
+    // MARK: - Session Configuration (Native Apple Quality + Live LiDAR Depth)
+
+    private func configureSession() {
+        captureSession.beginConfiguration()
+        defer { captureSession.commitConfiguration() }
+
+        captureSession.sessionPreset = .high
+
+        // Prefer Triple Camera (0.5x / 1x / 2x / 5x) -> LiDAR Depth Camera -> Dual Wide -> Wide
+        let deviceTypes: [AVCaptureDevice.DeviceType] = [
+            .builtInTripleCamera,
+            .builtInLiDARDepthCamera,
+            .builtInDualWideCamera,
+            .builtInWideAngleCamera
+        ]
+        let discovery = AVCaptureDevice.DiscoverySession(
+            deviceTypes: deviceTypes,
+            mediaType: .video,
+            position: .back
+        )
+        guard let device = discovery.devices.first,
+              let videoInput = try? AVCaptureDeviceInput(device: device),
+              captureSession.canAddInput(videoInput) else {
+            showToast("Câmara traseira indisponível")
+            return
+        }
+
+        captureSession.addInput(videoInput)
+        videoDevice = device
+
+        // Audio input for native synced video sound
+        if let audioDevice = AVCaptureDevice.default(for: .audio),
+           let audioInput = try? AVCaptureDeviceInput(device: audioDevice),
+           captureSession.canAddInput(audioInput) {
+            captureSession.addInput(audioInput)
+        }
+
+        // Photo output (Smart HDR, Photonic Engine, full-resolution HEIC)
+        if captureSession.canAddOutput(photoOutput) {
+            captureSession.addOutput(photoOutput)
+            photoOutput.maxPhotoQualityPrioritization = .quality
+        }
+
+        // Movie output (native HEVC + Cinematic Extended Stabilization + Audio)
+        if captureSession.canAddOutput(movieOutput) {
+            captureSession.addOutput(movieOutput)
+            if let videoConn = movieOutput.connection(with: .video) {
+                if videoConn.isVideoStabilizationSupported {
+                    videoConn.preferredVideoStabilizationMode = .cinematicExtended
+                }
+                if movieOutput.availableVideoCodecTypes.contains(.hevc) {
+                    movieOutput.setOutputSettings([AVVideoCodecKey: AVVideoCodecType.hevc], for: videoConn)
+                }
+            }
+        }
+
+        // Lightweight VideoDataOutput for background Apple Vision face tracking
+        videoDataOutput.alwaysDiscardsLateVideoFrames = true
+        videoDataOutput.setSampleBufferDelegate(self, queue: visionQueue)
+        if captureSession.canAddOutput(videoDataOutput) {
+            captureSession.addOutput(videoDataOutput)
+        }
+
+        // Live LiDAR Depth Data Output
+        var lidarEnabled = false
+        if captureSession.canAddOutput(depthDataOutput) {
+            captureSession.addOutput(depthDataOutput)
+            depthDataOutput.isFilteringEnabled = true
+            depthDataOutput.setDelegate(self, callbackQueue: depthQueue)
+
+            if let depthFormat = Self.selectBestDepthFormat(for: device) {
+                do {
+                    try device.lockForConfiguration()
+                    if let videoFormat = depthFormat.videoFormat {
+                        device.activeFormat = videoFormat
+                    }
+                    device.activeDepthDataFormat = depthFormat.depthFormat
+                    device.unlockForConfiguration()
+                    if let conn = depthDataOutput.connection(with: .depthData) {
+                        conn.isEnabled = true
+                    }
+                    lidarEnabled = true
+                } catch {
+                    lidarEnabled = false
+                }
+            }
+        }
+
+        // Compute lens switch-over multipliers (0.5x, 1x, 2x, 5x)
+        if device.deviceType == .builtInTripleCamera || device.deviceType == .builtInDualWideCamera {
+            wideZoomFactor = device.virtualDeviceSwitchOverVideoFactors.first?.doubleValue ?? 2.0
+        } else {
+            wideZoomFactor = 1.0
+        }
+
+        let minMult = Double(device.minAvailableVideoZoomFactor) / wideZoomFactor
+        let maxMult = Double(device.maxAvailableVideoZoomFactor) / wideZoomFactor
+        let candidateLenses: [Double] = [0.5, 1.0, 2.0, 5.0]
+        let supported = candidateLenses.filter { $0 >= minMult - 0.05 && $0 <= maxMult + 0.05 }
+
+        // Start cleanly at 1.0x
+        do {
+            try device.lockForConfiguration()
+            device.videoZoomFactor = CGFloat(max(Double(device.minAvailableVideoZoomFactor), wideZoomFactor))
+            if device.isFocusModeSupported(.continuousAutoFocus) {
+                device.focusMode = .continuousAutoFocus
+            }
+            if device.isExposureModeSupported(.continuousAutoExposure) {
+                device.exposureMode = .continuousAutoExposure
+            }
+            device.unlockForConfiguration()
+        } catch {}
+
+        DispatchQueue.main.async {
+            self.availableLenses = supported.isEmpty ? [1.0] : supported
+            self.activeLens = 1.0
+            self.hudStore.telemetry.hasLidarSupport = lidarEnabled
+        }
+
+        isConfigured = true
+    }
+
+    private static func selectBestDepthFormat(
+        for device: AVCaptureDevice
+    ) -> (videoFormat: AVCaptureDevice.Format?, depthFormat: AVCaptureDevice.Format)? {
+        // First check active format so we keep .high / 4K if already depth-capable
+        if let existing = pickDepthFormat(from: device.activeFormat.supportedDepthDataFormats) {
+            return (nil, existing)
+        }
+
+        // Otherwise pick highest-resolution depth-capable video format (preferring 1920x1080+)
+        let depthCapable = device.formats.filter { !$0.supportedDepthDataFormats.isEmpty }
+        let sorted = depthCapable.sorted { lhs, rhs in
+            let lDim = CMVideoFormatDescriptionGetDimensions(lhs.formatDescription)
+            let rDim = CMVideoFormatDescriptionGetDimensions(rhs.formatDescription)
+            return (Int(lDim.width) * Int(lDim.height)) > (Int(rDim.width) * Int(rDim.height))
+        }
+
+        for fmt in sorted {
+            if let depthFmt = pickDepthFormat(from: fmt.supportedDepthDataFormats) {
+                return (fmt, depthFmt)
+            }
+        }
+        return nil
+    }
+
+    private static func pickDepthFormat(from formats: [AVCaptureDevice.Format]) -> AVCaptureDevice.Format? {
+        let preferredTypes: [OSType] = [
+            kCVPixelFormatType_DepthFloat32,
+            kCVPixelFormatType_DepthFloat16,
+            kCVPixelFormatType_DisparityFloat32,
+            kCVPixelFormatType_DisparityFloat16
+        ]
+        for type in preferredTypes {
+            if let match = formats.first(where: {
+                CMFormatDescriptionGetMediaSubType($0.formatDescription) == type
+            }) {
+                return match
+            }
+        }
+        return formats.first
+    }
+
+    // MARK: - User Controls (Lenses, Focus, Exposure, Scene Packs)
+
+    func setLens(_ multiplier: Double) {
+        activeLens = multiplier
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.videoDevice else { return }
+            let rawFactor = multiplier * self.wideZoomFactor
+            let clamped = max(
+                device.minAvailableVideoZoomFactor,
+                min(device.maxAvailableVideoZoomFactor, CGFloat(rawFactor))
+            )
+            do {
+                try device.lockForConfiguration()
+                device.ramp(toVideoZoomFactor: clamped, withRate: 14.0)
+                device.unlockForConfiguration()
+            } catch {}
+        }
+    }
+
+    func focus(at devicePoint: CGPoint, screenPoint: CGPoint) {
+        DispatchQueue.main.async {
+            self.focusIndicatorPoint = screenPoint
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { [weak self] in
+                if self?.focusIndicatorPoint == screenPoint {
+                    self?.focusIndicatorPoint = nil
+                }
+            }
+        }
+
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.videoDevice else { return }
+            do {
+                try device.lockForConfiguration()
+                if device.isFocusPointOfInterestSupported {
+                    device.focusPointOfInterest = devicePoint
+                    if device.isFocusModeSupported(.autoFocus) {
+                        device.focusMode = .autoFocus
+                    }
+                }
+                if device.isExposurePointOfInterestSupported {
+                    device.exposurePointOfInterest = devicePoint
+                    if device.isExposureModeSupported(.continuousAutoExposure) {
+                        device.exposureMode = .continuousAutoExposure
+                    }
+                }
+                device.unlockForConfiguration()
+            } catch {}
+        }
+    }
+
+    func setExposureBias(_ ev: Float) {
+        let clamped = max(-2.0, min(2.0, ev))
+        exposureBias = clamped
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.videoDevice else { return }
+            let deviceClamped = max(device.minExposureTargetBias, min(device.maxExposureTargetBias, clamped))
+            do {
+                try device.lockForConfiguration()
+                device.setExposureTargetBias(deviceClamped, completionHandler: nil)
+                device.unlockForConfiguration()
+            } catch {}
+        }
     }
 
     func cycleOverlayMode() {
@@ -146,6 +363,9 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
         completedShotIds.removeAll()
         if let first = pack.shots.first {
             captureMode = first.preferredMode
+            if availableLenses.contains(first.recommendedLens) {
+                setLens(first.recommendedLens)
+            }
         }
         currentTargetShot = activeShot
         lastAdviceUpdate = 0
@@ -155,26 +375,17 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
     func selectShot(at index: Int) {
         guard selectedPack.shots.indices.contains(index) else { return }
         activeShotIndex = index
-        captureMode = selectedPack.shots[index].preferredMode
-        currentTargetShot = activeShot
+        let shot = selectedPack.shots[index]
+        captureMode = shot.preferredMode
+        if availableLenses.contains(shot.recommendedLens) {
+            setLens(shot.recommendedLens)
+        }
+        currentTargetShot = shot
         lastAdviceUpdate = 0
         wasLocked = false
     }
 
-    private static func selectOptimalVideoFormat() -> ARConfiguration.VideoFormat? {
-        let formats = ARWorldTrackingConfiguration.supportedVideoFormats
-        let sixtyFps = formats.filter { $0.framesPerSecond >= 60 }
-        if !sixtyFps.isEmpty {
-            return sixtyFps.min { lhs, rhs in
-                let lhsDiff = abs(lhs.imageResolution.width - 1920)
-                let rhsDiff = abs(rhs.imageResolution.width - 1920)
-                return lhsDiff < rhsDiff
-            }
-        }
-        return formats.first
-    }
-
-    // MARK: - CoreMotion (Background Queue + Exponential Smoothing)
+    // MARK: - CoreMotion (Background 60Hz)
 
     private func startMotionUpdates() {
         guard motionManager.isDeviceMotionAvailable else { return }
@@ -206,62 +417,41 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
         }
     }
 
-    // MARK: - ARSessionDelegate
+    // MARK: - 30Hz HUD Update Loop
 
-    func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        if isRecordingFlag {
-            appendVideoFrame(frame)
+    private func startHUDLoop() {
+        hudTimer?.cancel()
+        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .userInteractive))
+        timer.schedule(deadline: .now(), repeating: .milliseconds(33))
+        timer.setEventHandler { [weak self] in
+            self?.publishHUDTick()
         }
+        timer.resume()
+        hudTimer = timer
+    }
 
-        let now = frame.timestamp
-
-        // Run Apple Vision face detection at ~5Hz on background utility queue
-        if now - lastVisionUpdate >= 0.20 && !isAnalyzingVision {
-            lastVisionUpdate = now
-            runVisionFaceDetection(on: frame.capturedImage)
-        }
-
-        // Update HUD reticle & horizon at ~30Hz (33ms)
-        guard now - lastHUDUpdate >= 0.033 else { return }
-        lastHUDUpdate = now
-
+    private func publishHUDTick() {
         sensorLock.lock()
         let pitch = smoothedPitchDegrees
         let roll = smoothedRollDegrees
         let motionSpeed = smoothedMotionSpeed
+        let distance = smoothedDistanceMeters
         let faceRect = latestFaceRect
         sensorLock.unlock()
 
         let motionPace = ShotCoachEngine.classifyMotionPace(speedDegPerSec: motionSpeed)
+        let iso = Double(videoDevice?.iso ?? 200)
+        let lighting: LightingCondition = iso > 900 ? .low : (iso < 60 ? .bright : .balanced)
 
-        // Sample LiDAR depth & recompute coaching advice at ~8Hz (125ms)
-        let shouldUpdateAdvice = (now - lastAdviceUpdate >= 0.125)
-        var currentDistance = smoothedDistanceMeters
-
-        if shouldUpdateAdvice {
+        let now = CACurrentMediaTime()
+        if now - lastAdviceUpdate >= 0.125 {
             lastAdviceUpdate = now
-
-            let depthMap = frame.smoothedSceneDepth?.depthMap ?? frame.sceneDepth?.depthMap
-            if let rawDistance = depthMap.flatMap({ Self.sampleCenterDepth(from: $0) }) {
-                if let prev = smoothedDistanceMeters {
-                    currentDistance = prev + 0.35 * (rawDistance - prev)
-                } else {
-                    currentDistance = rawDistance
-                }
-                smoothedDistanceMeters = currentDistance
-            } else {
-                currentDistance = nil
-                smoothedDistanceMeters = nil
-            }
-
-            let lumens = Double(frame.lightEstimate?.ambientIntensity ?? 1000)
-            cachedLighting = ShotCoachEngine.classifyLighting(lumens: lumens)
-            cachedDetectedShot = ShotCoachEngine.detectShotKind(distanceMeters: currentDistance, pitchDegrees: pitch)
+            cachedDetectedShot = ShotCoachEngine.detectShotKind(distanceMeters: distance, pitchDegrees: pitch)
             cachedAdvice = ShotCoachEngine.evaluate(
-                distanceMeters: currentDistance,
+                distanceMeters: distance,
                 pitchDegrees: pitch,
                 rollDegrees: roll,
-                lighting: cachedLighting,
+                lighting: lighting,
                 motionPace: motionPace,
                 detectedFaceRect: faceRect,
                 isRecording: isRecordingFlag,
@@ -270,7 +460,6 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
         }
 
         let advice = cachedAdvice
-        let lighting = cachedLighting
         let detected = cachedDetectedShot
 
         DispatchQueue.main.async {
@@ -279,7 +468,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
             next.rollDegrees = roll
             next.motionSpeedDegPerSec = motionSpeed
             next.motionPace = motionPace
-            next.lidarDistanceMeters = currentDistance
+            next.lidarDistanceMeters = distance
             next.lighting = lighting
             next.detectedShotKind = detected
             next.detectedFaceRect = faceRect
@@ -293,59 +482,218 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
         }
     }
 
-    func session(_ session: ARSession, didOutputAudioSampleBuffer audioSampleBuffer: CMSampleBuffer) {
-        guard isRecordingFlag else { return }
+    // MARK: - Capture Native Photo (Smart HDR + Photonic Engine)
 
-        writerQueue.async { [weak self] in
-            guard let self,
-                  let writer = self.assetWriter,
-                  let audioInput = self.audioInput,
-                  let startTime = self.recordingStartTimestamp,
-                  writer.status == .writing,
-                  audioInput.isReadyForMoreMediaData else { return }
-
-            let pts = CMSampleBufferGetPresentationTimeStamp(audioSampleBuffer)
-            if pts >= startTime {
-                audioInput.append(audioSampleBuffer)
-            }
-        }
-    }
-
-    // MARK: - Apple Vision Face Detection
-
-    private func runVisionFaceDetection(on pixelBuffer: CVPixelBuffer) {
-        isAnalyzingVision = true
-        let orientation = currentImageOrientation()
-
-        visionQueue.async { [weak self] in
+    func capturePhoto() {
+        sessionQueue.async { [weak self] in
             guard let self else { return }
-            defer { self.isAnalyzingVision = false }
+            let settings: AVCapturePhotoSettings
+            if self.photoOutput.availablePhotoCodecTypes.contains(.hevc) {
+                settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.hevc])
+            } else {
+                settings = AVCapturePhotoSettings()
+            }
+            settings.photoQualityPrioritization = .quality
 
-            let request = VNDetectFaceRectanglesRequest()
-            let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation, options: [:])
-            do {
-                try handler.perform([request])
-                if let face = (request.results ?? []).max(by: {
-                    ($0.boundingBox.width * $0.boundingBox.height) < ($1.boundingBox.width * $1.boundingBox.height)
-                }) {
-                    let b = face.boundingBox
-                    // Convert Vision bottom-left origin to SwiftUI top-left origin
-                    let converted = CGRect(x: b.minX, y: 1.0 - b.maxY, width: b.width, height: b.height)
-                    self.sensorLock.lock()
-                    self.latestFaceRect = converted
-                    self.sensorLock.unlock()
-                } else {
-                    self.sensorLock.lock()
-                    self.latestFaceRect = nil
-                    self.sensorLock.unlock()
+            if let conn = self.photoOutput.connection(with: .video) {
+                conn.videoRotationAngle = self.currentVideoRotationAngle()
+            }
+            self.photoOutput.capturePhoto(with: settings, delegate: self)
+        }
+    }
+
+    // MARK: - Capture Native Movie (4K/1080p HEVC + Cinematic Stabilization + Audio)
+
+    func toggleVideoRecording() {
+        if isRecording {
+            stopVideoRecording()
+        } else {
+            startVideoRecording()
+        }
+    }
+
+    private func startVideoRecording() {
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FramePilot-\(UUID().uuidString).mov")
+
+        sessionQueue.async { [weak self] in
+            guard let self, !self.movieOutput.isRecording else { return }
+            if let conn = self.movieOutput.connection(with: .video) {
+                conn.videoRotationAngle = self.currentVideoRotationAngle()
+            }
+            self.isRecordingFlag = true
+            self.movieOutput.startRecording(to: tempURL, recordingDelegate: self)
+
+            DispatchQueue.main.async {
+                self.isRecording = true
+                self.recordingSeconds = 0
+                self.impactFeedback.impactOccurred()
+                self.recordingTimer?.invalidate()
+                self.recordingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+                    self?.recordingSeconds += 1
                 }
-            } catch {
-                // Ignore transient Vision errors
             }
         }
     }
 
-    /// Samples a 3x3 patch around the center of the LiDAR depth map (fast & noise-resistant).
+    private func stopVideoRecording() {
+        isRecordingFlag = false
+        DispatchQueue.main.async {
+            self.isRecording = false
+            self.recordingTimer?.invalidate()
+            self.recordingTimer = nil
+        }
+
+        sessionQueue.async { [weak self] in
+            guard let self, self.movieOutput.isRecording else { return }
+            self.movieOutput.stopRecording()
+        }
+    }
+
+    private func markActiveShotCaptured() {
+        guard let shot = activeShot else { return }
+        completedShotIds.insert(shot.id)
+        if activeShotIndex + 1 < selectedPack.shots.count {
+            activeShotIndex += 1
+            let nextShot = selectedPack.shots[activeShotIndex]
+            captureMode = nextShot.preferredMode
+            if availableLenses.contains(nextShot.recommendedLens) {
+                setLens(nextShot.recommendedLens)
+            }
+            currentTargetShot = nextShot
+            lastAdviceUpdate = 0
+            wasLocked = false
+        }
+    }
+
+    private func showToast(_ text: String) {
+        DispatchQueue.main.async {
+            self.statusToast = text
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { [weak self] in
+                if self?.statusToast == text {
+                    self?.statusToast = nil
+                }
+            }
+        }
+    }
+
+    private func currentVideoRotationAngle() -> CGFloat {
+        switch UIDevice.current.orientation {
+        case .landscapeLeft: return 0
+        case .landscapeRight: return 180
+        case .portraitUpsideDown: return 270
+        default: return 90
+        }
+    }
+
+    private func currentVisionOrientation() -> CGImagePropertyOrientation {
+        switch UIDevice.current.orientation {
+        case .landscapeLeft: return .up
+        case .landscapeRight: return .down
+        case .portraitUpsideDown: return .left
+        default: return .right
+        }
+    }
+}
+
+// MARK: - AVCapturePhotoCaptureDelegate
+
+extension SpatialCameraEngine: AVCapturePhotoCaptureDelegate {
+    func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
+        guard error == nil, let data = photo.fileDataRepresentation() else {
+            showToast("Erro ao capturar foto")
+            return
+        }
+
+        PHPhotoLibrary.requestAuthorization(for: .addOnly) { [weak self] status in
+            guard let self else { return }
+            guard status == .authorized || status == .limited else {
+                self.showToast("Permite acesso à galeria nas Definições")
+                return
+            }
+
+            PHPhotoLibrary.shared().performChanges({
+                let request = PHAssetCreationRequest.forAsset()
+                request.addResource(with: .photo, data: data, options: nil)
+            }) { success, _ in
+                DispatchQueue.main.async {
+                    if success {
+                        self.notificationFeedback.notificationOccurred(.success)
+                        self.markActiveShotCaptured()
+                        self.showToast("Foto Pro guardada na galeria")
+                    } else {
+                        self.showToast("Erro ao guardar foto")
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - AVCaptureFileOutputRecordingDelegate
+
+extension SpatialCameraEngine: AVCaptureFileOutputRecordingDelegate {
+    func fileOutput(
+        _ output: AVCaptureFileOutput,
+        didFinishRecordingTo outputFileURL: URL,
+        from connections: [AVCaptureConnection],
+        error: Error?
+    ) {
+        guard error == nil else {
+            try? FileManager.default.removeItem(at: outputFileURL)
+            showToast("Erro na gravação de vídeo")
+            return
+        }
+
+        PHPhotoLibrary.requestAuthorization(for: .addOnly) { [weak self] status in
+            guard let self else { return }
+            guard status == .authorized || status == .limited else {
+                try? FileManager.default.removeItem(at: outputFileURL)
+                self.showToast("Permite acesso à galeria nas Definições")
+                return
+            }
+
+            PHPhotoLibrary.shared().performChanges({
+                PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: outputFileURL)
+            }) { success, _ in
+                try? FileManager.default.removeItem(at: outputFileURL)
+                DispatchQueue.main.async {
+                    if success {
+                        self.notificationFeedback.notificationOccurred(.success)
+                        self.markActiveShotCaptured()
+                        self.showToast("Vídeo Pro guardado na galeria")
+                    } else {
+                        self.showToast("Erro ao guardar vídeo")
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - AVCaptureDepthDataOutputDelegate (Live LiDAR Distance)
+
+extension SpatialCameraEngine: AVCaptureDepthDataOutputDelegate {
+    func depthDataOutput(
+        _ output: AVCaptureDepthDataOutput,
+        didOutput depthData: AVDepthData,
+        timestamp: CMTime,
+        connection: AVCaptureConnection
+    ) {
+        let converted = depthData.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32)
+        let depthMap = converted.depthDataMap
+
+        guard let rawDistance = Self.sampleCenterDepth(from: depthMap) else { return }
+
+        sensorLock.lock()
+        if let prev = smoothedDistanceMeters {
+            smoothedDistanceMeters = prev + 0.35 * (rawDistance - prev)
+        } else {
+            smoothedDistanceMeters = rawDistance
+        }
+        sensorLock.unlock()
+    }
+
     private static func sampleCenterDepth(from depthMap: CVPixelBuffer) -> Double? {
         CVPixelBufferLockBaseAddress(depthMap, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
@@ -378,279 +726,46 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
         samples.sort()
         return Double(samples[samples.count / 2])
     }
+}
 
-    // MARK: - Capture Photo (Full High-Resolution ARFrame + Display P3 HEIF)
+// MARK: - AVCaptureVideoDataOutputSampleBufferDelegate (5Hz Apple Vision Face Tracking)
 
-    func capturePhoto() {
-        let orientation = currentImageOrientation()
+extension SpatialCameraEngine: AVCaptureVideoDataOutputSampleBufferDelegate {
+    func captureOutput(
+        _ output: AVCaptureOutput,
+        didOutput sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
+    ) {
+        let now = CACurrentMediaTime()
+        guard now - lastVisionTimestamp >= 0.20, !isAnalyzingVision else { return }
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
-        // Use ARKit's high-resolution still capture (12MP / 4K sensor frame) instead of the 1080p preview frame
-        arSession.captureHighResolutionFrame { [weak self] highResFrame, _ in
-            guard let self else { return }
-            guard let frame = highResFrame ?? self.arSession.currentFrame else { return }
-            let pixelBuffer = frame.capturedImage
+        lastVisionTimestamp = now
+        isAnalyzingVision = true
+        defer { isAnalyzingVision = false }
 
-            self.writerQueue.async { [weak self] in
-                guard let self else { return }
-                let ciImage = CIImage(cvPixelBuffer: pixelBuffer).oriented(orientation)
-                let colorSpace = CGColorSpace(name: CGColorSpace.displayP3) ?? CGColorSpaceCreateDeviceRGB()
-                let heifOptions: [CIImageRepresentationOption: Any] = [
-                    CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): 0.95
-                ]
-                let heifData = self.ciContext.heifRepresentation(
-                    of: ciImage,
-                    format: .RGBA8,
-                    colorSpace: colorSpace,
-                    options: heifOptions
-                )
+        let request = VNDetectFaceRectanglesRequest()
+        let handler = VNImageRequestHandler(
+            cvPixelBuffer: pixelBuffer,
+            orientation: currentVisionOrientation(),
+            options: [:]
+        )
 
-                let fallbackImage: UIImage? = heifData == nil
-                    ? self.ciContext.createCGImage(ciImage, from: ciImage.extent).map { UIImage(cgImage: $0) }
-                    : nil
-
-                guard heifData != nil || fallbackImage != nil else { return }
-
-                PHPhotoLibrary.requestAuthorization(for: .addOnly) { [weak self] status in
-                    guard let self else { return }
-                    guard status == .authorized || status == .limited else {
-                        self.showToast("Permite acesso à galeria nas Definições")
-                        return
-                    }
-
-                    PHPhotoLibrary.shared().performChanges({
-                        if let heifData {
-                            let request = PHAssetCreationRequest.forAsset()
-                            request.addResource(with: .photo, data: heifData, options: nil)
-                        } else if let fallbackImage {
-                            PHAssetChangeRequest.creationRequestForAsset(from: fallbackImage)
-                        }
-                    }) { success, _ in
-                        DispatchQueue.main.async {
-                            if success {
-                                self.notificationFeedback.notificationOccurred(.success)
-                                self.markActiveShotCaptured()
-                                self.showToast("Foto HD guardada na galeria")
-                            } else {
-                                self.showToast("Erro ao guardar foto")
-                            }
-                        }
-                    }
-                }
+        do {
+            try handler.perform([request])
+            if let face = (request.results ?? []).max(by: {
+                ($0.boundingBox.width * $0.boundingBox.height) < ($1.boundingBox.width * $1.boundingBox.height)
+            }) {
+                let b = face.boundingBox
+                let converted = CGRect(x: b.minX, y: 1.0 - b.maxY, width: b.width, height: b.height)
+                sensorLock.lock()
+                latestFaceRect = converted
+                sensorLock.unlock()
+            } else {
+                sensorLock.lock()
+                latestFaceRect = nil
+                sensorLock.unlock()
             }
-        }
-    }
-
-    // MARK: - Capture Video (Hardware HEVC + AAC Audio + Non-Blocking Frame Drop Guard)
-
-    func toggleVideoRecording() {
-        if isRecording {
-            stopVideoRecording()
-        } else {
-            startVideoRecording()
-        }
-    }
-
-    private func startVideoRecording() {
-        guard let frame = arSession.currentFrame else { return }
-        let width = CVPixelBufferGetWidth(frame.capturedImage)
-        let height = CVPixelBufferGetHeight(frame.capturedImage)
-        let transform = currentVideoTransform()
-
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("FramePilot-\(UUID().uuidString).mov")
-
-        writerQueue.async { [weak self] in
-            guard let self else { return }
-            do {
-                let writer = try AVAssetWriter(outputURL: tempURL, fileType: .mov)
-
-                let videoSettings: [String: Any] = [
-                    AVVideoCodecKey: AVVideoCodecType.hevc,
-                    AVVideoWidthKey: width,
-                    AVVideoHeightKey: height,
-                    AVVideoCompressionPropertiesKey: [
-                        AVVideoAverageBitRateKey: 20_000_000,
-                        AVVideoExpectedSourceFrameRateKey: 60
-                    ]
-                ]
-                let vInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
-                vInput.expectsMediaDataInRealTime = true
-                vInput.transform = transform
-
-                let attrs: [String: Any] = [
-                    kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-                    kCVPixelBufferWidthKey as String: width,
-                    kCVPixelBufferHeightKey as String: height,
-                    kCVPixelBufferMetalCompatibilityKey as String: true
-                ]
-                let adaptor = AVAssetWriterInputPixelBufferAdaptor(
-                    assetWriterInput: vInput,
-                    sourcePixelBufferAttributes: attrs
-                )
-
-                guard writer.canAdd(vInput) else { return }
-                writer.add(vInput)
-
-                let audioSettings: [String: Any] = [
-                    AVFormatIDKey: kAudioFormatMPEG4AAC,
-                    AVSampleRateKey: 44100,
-                    AVNumberOfChannelsKey: 1,
-                    AVEncoderBitRateKey: 128000
-                ]
-                let aInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
-                aInput.expectsMediaDataInRealTime = true
-                if writer.canAdd(aInput) {
-                    writer.add(aInput)
-                    self.audioInput = aInput
-                } else {
-                    self.audioInput = nil
-                }
-
-                writer.startWriting()
-
-                self.assetWriter = writer
-                self.videoInput = vInput
-                self.pixelBufferAdaptor = adaptor
-                self.recordingURL = tempURL
-                self.recordingStartTimestamp = nil
-                self.isEncodingFrame = false
-                self.isRecordingFlag = true
-
-                DispatchQueue.main.async {
-                    self.isRecording = true
-                    self.recordingSeconds = 0
-                    self.impactFeedback.impactOccurred()
-                    self.recordingTimer?.invalidate()
-                    self.recordingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-                        self?.recordingSeconds += 1
-                    }
-                }
-            } catch {
-                self.showToast("Não foi possível iniciar vídeo")
-            }
-        }
-    }
-
-    private func appendVideoFrame(_ frame: ARFrame) {
-        guard !isEncodingFrame else { return }
-        isEncodingFrame = true
-
-        let pixelBuffer = frame.capturedImage
-        let timestamp = CMTime(seconds: frame.timestamp, preferredTimescale: 600)
-
-        writerQueue.async { [weak self] in
-            guard let self else { return }
-            defer { self.isEncodingFrame = false }
-
-            guard let writer = self.assetWriter,
-                  let input = self.videoInput,
-                  let adaptor = self.pixelBufferAdaptor,
-                  writer.status == .writing,
-                  input.isReadyForMoreMediaData else { return }
-
-            if self.recordingStartTimestamp == nil {
-                writer.startSession(atSourceTime: timestamp)
-                self.recordingStartTimestamp = timestamp
-            }
-
-            guard let pool = adaptor.pixelBufferPool else { return }
-            var renderedBuffer: CVPixelBuffer?
-            CVPixelBufferPoolCreatePixelBuffer(nil, pool, &renderedBuffer)
-            if let renderedBuffer {
-                let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-                self.ciContext.render(ciImage, to: renderedBuffer)
-                adaptor.append(renderedBuffer, withPresentationTime: timestamp)
-            }
-        }
-    }
-
-    private func stopVideoRecording() {
-        isRecordingFlag = false
-        DispatchQueue.main.async {
-            self.isRecording = false
-            self.recordingTimer?.invalidate()
-            self.recordingTimer = nil
-        }
-
-        writerQueue.async { [weak self] in
-            guard let self,
-                  let writer = self.assetWriter,
-                  let vInput = self.videoInput,
-                  let outputURL = self.recordingURL else { return }
-
-            vInput.markAsFinished()
-            self.audioInput?.markAsFinished()
-            writer.finishWriting { [weak self] in
-                guard let self else { return }
-                self.assetWriter = nil
-                self.videoInput = nil
-                self.audioInput = nil
-                self.pixelBufferAdaptor = nil
-                self.recordingStartTimestamp = nil
-                self.isEncodingFrame = false
-
-                PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
-                    guard status == .authorized || status == .limited else {
-                        self.showToast("Permite acesso à galeria nas Definições")
-                        return
-                    }
-                    PHPhotoLibrary.shared().performChanges({
-                        PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: outputURL)
-                    }) { success, _ in
-                        try? FileManager.default.removeItem(at: outputURL)
-                        DispatchQueue.main.async {
-                            if success {
-                                self.notificationFeedback.notificationOccurred(.success)
-                                self.markActiveShotCaptured()
-                                self.showToast("Vídeo com áudio guardado")
-                            } else {
-                                self.showToast("Erro ao guardar vídeo")
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private func markActiveShotCaptured() {
-        guard let shot = activeShot else { return }
-        completedShotIds.insert(shot.id)
-        if activeShotIndex + 1 < selectedPack.shots.count {
-            activeShotIndex += 1
-            captureMode = selectedPack.shots[activeShotIndex].preferredMode
-            currentTargetShot = activeShot
-            lastAdviceUpdate = 0
-            wasLocked = false
-        }
-    }
-
-    private func showToast(_ text: String) {
-        DispatchQueue.main.async {
-            self.statusToast = text
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { [weak self] in
-                if self?.statusToast == text {
-                    self?.statusToast = nil
-                }
-            }
-        }
-    }
-
-    private func currentImageOrientation() -> CGImagePropertyOrientation {
-        switch UIDevice.current.orientation {
-        case .landscapeLeft: return .up
-        case .landscapeRight: return .down
-        case .portraitUpsideDown: return .left
-        default: return .right
-        }
-    }
-
-    private func currentVideoTransform() -> CGAffineTransform {
-        switch UIDevice.current.orientation {
-        case .landscapeLeft: return .identity
-        case .landscapeRight: return CGAffineTransform(rotationAngle: .pi)
-        case .portraitUpsideDown: return CGAffineTransform(rotationAngle: -.pi / 2)
-        default: return CGAffineTransform(rotationAngle: .pi / 2)
-        }
+        } catch {}
     }
 }

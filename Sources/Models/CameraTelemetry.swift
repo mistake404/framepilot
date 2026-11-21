@@ -62,7 +62,6 @@ struct CameraTelemetry {
     var pitchDegrees: Double = 0
     var rollDegrees: Double = 0
     var motionSpeedDegPerSec: Double = 0
-    var ambientLumens: Double = 1000
     var hasLidarSupport: Bool = false
     var detectedShotKind: ShotKind = .medium
     var lighting: LightingCondition = .balanced

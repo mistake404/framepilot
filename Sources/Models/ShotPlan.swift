@@ -38,6 +38,7 @@ struct ShotTemplate: Identifiable, Hashable {
     let title: String
     let kind: ShotKind
     let preferredMode: CaptureMode
+    let recommendedLens: Double                  // 0.5, 1.0, 2.0, 5.0
     let targetDistanceRange: ClosedRange<Double> // metros (via LiDAR)
     let targetPitchRange: ClosedRange<Double>    // graus (+ = olhar para cima, - = olhar para baixo)
     let maxRollDegrees: Double                   // tolerância do horizonte
@@ -52,6 +53,10 @@ struct ShotTemplate: Identifiable, Hashable {
         let low = Int(targetPitchRange.lowerBound.rounded())
         let high = Int(targetPitchRange.upperBound.rounded())
         return "\(low)° a \(high)°"
+    }
+
+    var lensLabel: String {
+        recommendedLens == 0.5 ? "0.5x" : "\(Int(recommendedLens))x"
     }
 }
 
@@ -74,6 +79,7 @@ struct ScenePack: Identifiable, Hashable {
                     title: "Contexto",
                     kind: .establishing,
                     preferredMode: .video,
+                    recommendedLens: 1.0,
                     targetDistanceRange: 1.4...2.8,
                     targetPitchRange: -12...8,
                     maxRollDegrees: 3.0,
@@ -85,28 +91,31 @@ struct ScenePack: Identifiable, Hashable {
                     title: "Herói Baixo",
                     kind: .lowAngle,
                     preferredMode: .photo,
+                    recommendedLens: 1.0,
                     targetDistanceRange: 0.6...1.3,
                     targetPitchRange: 10...28,
                     maxRollDegrees: 3.0,
                     movementHint: "Estático / micro-tilt",
-                    directorTip: "Baixa o iPhone ao nível da mesa e inclina ligeiramente para cima para dar presença."
+                    directorTip: "Baixa o iPhone ao nível da mesa e inclina ligeiramente para cima."
                 ),
                 ShotTemplate(
                     id: "ugc-3",
                     title: "Detalhe Textura",
                     kind: .detail,
                     preferredMode: .video,
-                    targetDistanceRange: 0.25...0.55,
+                    recommendedLens: 2.0,
+                    targetDistanceRange: 0.25...0.65,
                     targetPitchRange: -25...10,
                     maxRollDegrees: 4.5,
                     movementHint: "Deslize lateral suave",
-                    directorTip: "Aproxima bem para destacar rótulo, acabamento ou material."
+                    directorTip: "Usa 2x para comprimir o fundo e destacar rótulo ou material."
                 ),
                 ShotTemplate(
                     id: "ugc-4",
                     title: "Vista Superior",
                     kind: .highAngle,
                     preferredMode: .photo,
+                    recommendedLens: 1.0,
                     targetDistanceRange: 0.5...1.1,
                     targetPitchRange: -85...(-45),
                     maxRollDegrees: 5.0,
@@ -118,6 +127,7 @@ struct ScenePack: Identifiable, Hashable {
                     title: "Órbita Final",
                     kind: .orbit,
                     preferredMode: .video,
+                    recommendedLens: 1.0,
                     targetDistanceRange: 0.7...1.5,
                     targetPitchRange: -8...12,
                     maxRollDegrees: 3.0,
@@ -137,28 +147,31 @@ struct ScenePack: Identifiable, Hashable {
                     title: "Situar o Local",
                     kind: .establishing,
                     preferredMode: .video,
+                    recommendedLens: 0.5,
                     targetDistanceRange: 2.5...5.0,
                     targetPitchRange: -8...12,
                     maxRollDegrees: 2.5,
                     movementHint: "Panorâmica lenta",
-                    directorTip: "Abre a cena com arquitetura ou paisagem e horizonte bem nivelado."
+                    directorTip: "Usa 0.5x para abrir a arquitetura/paisagem com horizonte nivelado."
                 ),
                 ShotTemplate(
                     id: "trv-2",
                     title: "Contrapicado Urbano",
                     kind: .lowAngle,
                     preferredMode: .photo,
+                    recommendedLens: 0.5,
                     targetDistanceRange: 1.2...3.5,
                     targetPitchRange: 18...42,
                     maxRollDegrees: 3.5,
                     movementHint: "Estático junto ao chão",
-                    directorTip: "Dá escala a edifícios, arcos ou pessoas a caminhar."
+                    directorTip: "0.5x + contrapicado dá escala dramática a edifícios e ruas."
                 ),
                 ShotTemplate(
                     id: "trv-3",
                     title: "Plano Médio",
                     kind: .medium,
                     preferredMode: .video,
+                    recommendedLens: 1.0,
                     targetDistanceRange: 1.2...2.4,
                     targetPitchRange: -8...8,
                     maxRollDegrees: 3.0,
@@ -170,7 +183,8 @@ struct ScenePack: Identifiable, Hashable {
                     title: "Detalhe Local",
                     kind: .detail,
                     preferredMode: .photo,
-                    targetDistanceRange: 0.3...0.8,
+                    recommendedLens: 2.0,
+                    targetDistanceRange: 0.35...0.9,
                     targetPitchRange: -20...15,
                     maxRollDegrees: 4.0,
                     movementHint: "Estático",
@@ -181,7 +195,7 @@ struct ScenePack: Identifiable, Hashable {
         ScenePack(
             id: "editorial-portrait",
             name: "Retrato Editorial",
-            subtitle: "4 ângulos que valorizam rosto, postura e ambiente",
+            subtitle: "4 ângulos com lentes que valorizam o rosto",
             iconName: "person.fill.viewfinder",
             shots: [
                 ShotTemplate(
@@ -189,6 +203,7 @@ struct ScenePack: Identifiable, Hashable {
                     title: "Retrato Ambiental",
                     kind: .establishing,
                     preferredMode: .photo,
+                    recommendedLens: 1.0,
                     targetDistanceRange: 2.0...3.8,
                     targetPitchRange: -6...6,
                     maxRollDegrees: 2.5,
@@ -200,28 +215,31 @@ struct ScenePack: Identifiable, Hashable {
                     title: "Plano Americano",
                     kind: .medium,
                     preferredMode: .photo,
-                    targetDistanceRange: 1.3...2.2,
+                    recommendedLens: 2.0,
+                    targetDistanceRange: 1.4...2.4,
                     targetPitchRange: -5...8,
                     maxRollDegrees: 2.5,
                     movementHint: "Estático",
-                    directorTip: "Enquadra dos joelhos/cintura para cima com a câmara à altura do peito."
+                    directorTip: "2x com a câmara à altura do peito dá proporções de cinema."
                 ),
                 ShotTemplate(
                     id: "prt-3",
                     title: "Grande Plano",
                     kind: .closeUp,
                     preferredMode: .photo,
-                    targetDistanceRange: 0.65...1.15,
+                    recommendedLens: 5.0,
+                    targetDistanceRange: 1.0...2.0,
                     targetPitchRange: -6...6,
                     maxRollDegrees: 2.5,
                     movementHint: "Estático",
-                    directorTip: "Mantém a lente à altura dos olhos para proporções naturais."
+                    directorTip: "5x comprime o fundo e cria desfoque natural sem distorcer o rosto."
                 ),
                 ShotTemplate(
                     id: "prt-4",
                     title: "Ângulo Herói",
                     kind: .lowAngle,
                     preferredMode: .video,
+                    recommendedLens: 1.0,
                     targetDistanceRange: 1.0...2.0,
                     targetPitchRange: 12...26,
                     maxRollDegrees: 3.0,
@@ -241,40 +259,43 @@ struct ScenePack: Identifiable, Hashable {
                     title: "3/4 Baixo",
                     kind: .lowAngle,
                     preferredMode: .photo,
+                    recommendedLens: 1.0,
                     targetDistanceRange: 2.0...4.2,
                     targetPitchRange: 6...22,
                     maxRollDegrees: 2.5,
                     movementHint: "Agachado junto aos faróis",
-                    directorTip: "Baixa a câmara à altura do farol para o veículo parecer mais largo e agressivo."
+                    directorTip: "Baixa à altura do farol para o veículo parecer mais largo e agressivo."
                 ),
                 ShotTemplate(
                     id: "car-2",
                     title: "Reveal Lateral",
                     kind: .reveal,
                     preferredMode: .video,
+                    recommendedLens: 0.5,
                     targetDistanceRange: 1.4...3.0,
                     targetPitchRange: -4...10,
                     maxRollDegrees: 2.5,
                     movementHint: "Travelling lateral suave",
-                    directorTip: "Percorre as linhas da carroçaria mantendo o horizonte travado."
+                    directorTip: "0.5x percorre as linhas da carroçaria com grande sensação de velocidade."
                 ),
                 ShotTemplate(
                     id: "car-3",
                     title: "Detalhe Jante / Farol",
                     kind: .detail,
                     preferredMode: .video,
-                    targetDistanceRange: 0.35...0.85,
+                    recommendedLens: 2.0,
+                    targetDistanceRange: 0.4...1.0,
                     targetPitchRange: -15...15,
                     maxRollDegrees: 3.5,
                     movementHint: "Push-in curto",
-                    directorTip: "Foca reflexos, pinça de travão, emblema ou ótica."
+                    directorTip: "Usa 2x para focar reflexos, pinça de travão, emblema ou ótica."
                 )
             ]
         ),
         ScenePack(
             id: "free-mode",
             name: "Modo Livre",
-            subtitle: "Telemetria LiDAR + deteção automática de plano",
+            subtitle: "Qualidade Pro + LiDAR + deteção automática de plano",
             iconName: "camera.metering.matrix",
             shots: []
         )
