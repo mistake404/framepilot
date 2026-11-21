@@ -3,6 +3,7 @@ import Combine
 import ARKit
 import CoreMotion
 import CoreImage
+import ImageIO
 import Metal
 import AVFoundation
 import Photos
@@ -98,6 +99,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
     func start() {
         let config = ARWorldTrackingConfiguration()
         config.isLightEstimationEnabled = true
+        config.isAutoFocusEnabled = true
         config.worldAlignment = .gravity
         config.environmentTexturing = .none
         config.planeDetection = []
@@ -377,36 +379,60 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
         return Double(samples[samples.count / 2])
     }
 
-    // MARK: - Capture Photo (Off-Main-Thread GPU Encoding)
+    // MARK: - Capture Photo (Full High-Resolution ARFrame + Display P3 HEIF)
 
     func capturePhoto() {
-        guard let frame = arSession.currentFrame else { return }
-        let pixelBuffer = frame.capturedImage
         let orientation = currentImageOrientation()
 
-        writerQueue.async { [weak self] in
+        // Use ARKit's high-resolution still capture (12MP / 4K sensor frame) instead of the 1080p preview frame
+        arSession.captureHighResolutionFrame { [weak self] highResFrame, _ in
             guard let self else { return }
-            let ciImage = CIImage(cvPixelBuffer: pixelBuffer).oriented(orientation)
-            guard let cgImage = self.ciContext.createCGImage(ciImage, from: ciImage.extent) else { return }
-            let uiImage = UIImage(cgImage: cgImage)
+            guard let frame = highResFrame ?? self.arSession.currentFrame else { return }
+            let pixelBuffer = frame.capturedImage
 
-            PHPhotoLibrary.requestAuthorization(for: .addOnly) { [weak self] status in
+            self.writerQueue.async { [weak self] in
                 guard let self else { return }
-                guard status == .authorized || status == .limited else {
-                    self.showToast("Permite acesso à galeria nas Definições")
-                    return
-                }
+                let ciImage = CIImage(cvPixelBuffer: pixelBuffer).oriented(orientation)
+                let colorSpace = CGColorSpace(name: CGColorSpace.displayP3) ?? CGColorSpaceCreateDeviceRGB()
+                let heifOptions: [CIImageRepresentationOption: Any] = [
+                    CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): 0.95
+                ]
+                let heifData = self.ciContext.heifRepresentation(
+                    of: ciImage,
+                    format: .RGBA8,
+                    colorSpace: colorSpace,
+                    options: heifOptions
+                )
 
-                PHPhotoLibrary.shared().performChanges({
-                    PHAssetChangeRequest.creationRequestForAsset(from: uiImage)
-                }) { success, _ in
-                    DispatchQueue.main.async {
-                        if success {
-                            self.notificationFeedback.notificationOccurred(.success)
-                            self.markActiveShotCaptured()
-                            self.showToast("Foto guardada na galeria")
-                        } else {
-                            self.showToast("Erro ao guardar foto")
+                let fallbackImage: UIImage? = heifData == nil
+                    ? self.ciContext.createCGImage(ciImage, from: ciImage.extent).map { UIImage(cgImage: $0) }
+                    : nil
+
+                guard heifData != nil || fallbackImage != nil else { return }
+
+                PHPhotoLibrary.requestAuthorization(for: .addOnly) { [weak self] status in
+                    guard let self else { return }
+                    guard status == .authorized || status == .limited else {
+                        self.showToast("Permite acesso à galeria nas Definições")
+                        return
+                    }
+
+                    PHPhotoLibrary.shared().performChanges({
+                        if let heifData {
+                            let request = PHAssetCreationRequest.forAsset()
+                            request.addResource(with: .photo, data: heifData, options: nil)
+                        } else if let fallbackImage {
+                            PHAssetChangeRequest.creationRequestForAsset(from: fallbackImage)
+                        }
+                    }) { success, _ in
+                        DispatchQueue.main.async {
+                            if success {
+                                self.notificationFeedback.notificationOccurred(.success)
+                                self.markActiveShotCaptured()
+                                self.showToast("Foto HD guardada na galeria")
+                            } else {
+                                self.showToast("Erro ao guardar foto")
+                            }
                         }
                     }
                 }
@@ -441,7 +467,11 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
                 let videoSettings: [String: Any] = [
                     AVVideoCodecKey: AVVideoCodecType.hevc,
                     AVVideoWidthKey: width,
-                    AVVideoHeightKey: height
+                    AVVideoHeightKey: height,
+                    AVVideoCompressionPropertiesKey: [
+                        AVVideoAverageBitRateKey: 20_000_000,
+                        AVVideoExpectedSourceFrameRateKey: 60
+                    ]
                 ]
                 let vInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
                 vInput.expectsMediaDataInRealTime = true
