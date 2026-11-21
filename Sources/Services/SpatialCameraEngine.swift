@@ -6,6 +6,7 @@ import CoreImage
 import Metal
 import AVFoundation
 import Photos
+import Vision
 import UIKit
 
 /// Isolated high-frequency telemetry store so 30Hz HUD updates never rebuild the main camera view tree.
@@ -24,7 +25,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
     @Published var isRecording: Bool = false
     @Published var recordingSeconds: Int = 0
     @Published var statusToast: String?
-    @Published var showGrid: Bool = true
+    @Published var overlayMode: OverlayMode = .thirds
 
     private let motionManager = CMMotionManager()
     private let motionQueue: OperationQueue = {
@@ -35,6 +36,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
         return q
     }()
     private let writerQueue = DispatchQueue(label: "com.framepilot.videoWriter", qos: .userInitiated)
+    private let visionQueue = DispatchQueue(label: "com.framepilot.vision", qos: .utility)
     private let sensorLock = NSLock()
 
     // Metal-backed CIContext for GPU-accelerated photo & video frame rendering
@@ -47,17 +49,25 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
 
     private var assetWriter: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
+    private var audioInput: AVAssetWriterInput?
     private var pixelBufferAdaptor: AVAssetWriterInputPixelBufferAdaptor?
     private var recordingURL: URL?
     private var recordingStartTimestamp: CMTime?
     private var recordingTimer: Timer?
     private var isEncodingFrame: Bool = false
+    private var isRecordingFlag: Bool = false
 
     // Smoothed sensor state (protected by sensorLock)
     private var smoothedPitchDegrees: Double = 0
     private var smoothedRollDegrees: Double = 0
+    private var smoothedMotionSpeed: Double = 0
     private var smoothedDistanceMeters: Double?
     private var hasMotionSample: Bool = false
+
+    // Vision subject detection state
+    private var lastVisionUpdate: TimeInterval = 0
+    private var isAnalyzingVision: Bool = false
+    private var latestFaceRect: CGRect?
 
     private var lastHUDUpdate: TimeInterval = 0
     private var lastAdviceUpdate: TimeInterval = 0
@@ -91,6 +101,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
         config.worldAlignment = .gravity
         config.environmentTexturing = .none
         config.planeDetection = []
+        config.providesAudioData = true
 
         // Prefer 60fps video format for native-like viewfinder fluidity
         if let best60fps = Self.selectOptimalVideoFormat() {
@@ -123,6 +134,10 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
         motionManager.stopDeviceMotionUpdates()
     }
 
+    func cycleOverlayMode() {
+        overlayMode = overlayMode.next
+    }
+
     func selectPack(_ pack: ScenePack) {
         selectedPack = pack
         activeShotIndex = 0
@@ -144,17 +159,8 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
         wasLocked = false
     }
 
-    func toggleShotCompleted(_ shot: ShotTemplate) {
-        if completedShotIds.contains(shot.id) {
-            completedShotIds.remove(shot.id)
-        } else {
-            completedShotIds.insert(shot.id)
-        }
-    }
-
     private static func selectOptimalVideoFormat() -> ARConfiguration.VideoFormat? {
         let formats = ARWorldTrackingConfiguration.supportedVideoFormats
-        // Prefer 60fps formats; among 60fps, pick 1920x1080 or highest resolution up to 1080p for zero thermal throttling
         let sixtyFps = formats.filter { $0.framesPerSecond >= 60 }
         if !sixtyFps.isEmpty {
             return sixtyFps.min { lhs, rhs in
@@ -172,22 +178,26 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
         guard motionManager.isDeviceMotionAvailable else { return }
         motionManager.deviceMotionUpdateInterval = 1.0 / 60.0
         motionManager.startDeviceMotionUpdates(to: motionQueue) { [weak self] motion, _ in
-            guard let self, let g = motion?.gravity else { return }
+            guard let self, let motion else { return }
+            let g = motion.gravity
+            let r = motion.rotationRate
 
             let pitchDeg = atan2(g.z, hypot(g.x, g.y)) * 180.0 / .pi
             let rawRollDeg = atan2(g.x, -g.y) * 180.0 / .pi
             let nearestRightAngle = (rawRollDeg / 90.0).rounded() * 90.0
             let horizonErrorDeg = rawRollDeg - nearestRightAngle
+            let angularSpeedDeg = sqrt(r.x * r.x + r.y * r.y + r.z * r.z) * 180.0 / .pi
 
             self.sensorLock.lock()
             if self.hasMotionSample {
-                // Smooth low-pass filter (responsive, zero jitter)
                 let alpha = 0.25
                 self.smoothedPitchDegrees += alpha * (pitchDeg - self.smoothedPitchDegrees)
                 self.smoothedRollDegrees += alpha * (horizonErrorDeg - self.smoothedRollDegrees)
+                self.smoothedMotionSpeed += 0.20 * (angularSpeedDeg - self.smoothedMotionSpeed)
             } else {
                 self.smoothedPitchDegrees = pitchDeg
                 self.smoothedRollDegrees = horizonErrorDeg
+                self.smoothedMotionSpeed = angularSpeedDeg
                 self.hasMotionSample = true
             }
             self.sensorLock.unlock()
@@ -197,21 +207,32 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
     // MARK: - ARSessionDelegate
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        if isRecording {
+        if isRecordingFlag {
             appendVideoFrame(frame)
         }
 
-        // Update HUD reticle & horizon at ~30Hz (33ms) for buttery smoothness
         let now = frame.timestamp
+
+        // Run Apple Vision face detection at ~5Hz on background utility queue
+        if now - lastVisionUpdate >= 0.20 && !isAnalyzingVision {
+            lastVisionUpdate = now
+            runVisionFaceDetection(on: frame.capturedImage)
+        }
+
+        // Update HUD reticle & horizon at ~30Hz (33ms)
         guard now - lastHUDUpdate >= 0.033 else { return }
         lastHUDUpdate = now
 
         sensorLock.lock()
         let pitch = smoothedPitchDegrees
         let roll = smoothedRollDegrees
+        let motionSpeed = smoothedMotionSpeed
+        let faceRect = latestFaceRect
         sensorLock.unlock()
 
-        // Sample LiDAR depth & recompute coaching advice at ~8Hz (125ms) to avoid jitter and save CPU
+        let motionPace = ShotCoachEngine.classifyMotionPace(speedDegPerSec: motionSpeed)
+
+        // Sample LiDAR depth & recompute coaching advice at ~8Hz (125ms)
         let shouldUpdateAdvice = (now - lastAdviceUpdate >= 0.125)
         var currentDistance = smoothedDistanceMeters
 
@@ -239,6 +260,9 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
                 pitchDegrees: pitch,
                 rollDegrees: roll,
                 lighting: cachedLighting,
+                motionPace: motionPace,
+                detectedFaceRect: faceRect,
+                isRecording: isRecordingFlag,
                 target: currentTargetShot
             )
         }
@@ -251,9 +275,12 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
             var next = self.hudStore.telemetry
             next.pitchDegrees = pitch
             next.rollDegrees = roll
+            next.motionSpeedDegPerSec = motionSpeed
+            next.motionPace = motionPace
             next.lidarDistanceMeters = currentDistance
             next.lighting = lighting
             next.detectedShotKind = detected
+            next.detectedFaceRect = faceRect
             next.advice = advice
             self.hudStore.telemetry = next
 
@@ -264,7 +291,59 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
         }
     }
 
-    /// Samples a 3x3 cross around the center of the LiDAR depth map (fast & noise-resistant).
+    func session(_ session: ARSession, didOutputAudioSampleBuffer audioSampleBuffer: CMSampleBuffer) {
+        guard isRecordingFlag else { return }
+
+        writerQueue.async { [weak self] in
+            guard let self,
+                  let writer = self.assetWriter,
+                  let audioInput = self.audioInput,
+                  let startTime = self.recordingStartTimestamp,
+                  writer.status == .writing,
+                  audioInput.isReadyForMoreMediaData else { return }
+
+            let pts = CMSampleBufferGetPresentationTimeStamp(audioSampleBuffer)
+            if pts >= startTime {
+                audioInput.append(audioSampleBuffer)
+            }
+        }
+    }
+
+    // MARK: - Apple Vision Face Detection
+
+    private func runVisionFaceDetection(on pixelBuffer: CVPixelBuffer) {
+        isAnalyzingVision = true
+        let orientation = currentImageOrientation()
+
+        visionQueue.async { [weak self] in
+            guard let self else { return }
+            defer { self.isAnalyzingVision = false }
+
+            let request = VNDetectFaceRectanglesRequest()
+            let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation, options: [:])
+            do {
+                try handler.perform([request])
+                if let face = (request.results ?? []).max(by: {
+                    ($0.boundingBox.width * $0.boundingBox.height) < ($1.boundingBox.width * $1.boundingBox.height)
+                }) {
+                    let b = face.boundingBox
+                    // Convert Vision bottom-left origin to SwiftUI top-left origin
+                    let converted = CGRect(x: b.minX, y: 1.0 - b.maxY, width: b.width, height: b.height)
+                    self.sensorLock.lock()
+                    self.latestFaceRect = converted
+                    self.sensorLock.unlock()
+                } else {
+                    self.sensorLock.lock()
+                    self.latestFaceRect = nil
+                    self.sensorLock.unlock()
+                }
+            } catch {
+                // Ignore transient Vision errors
+            }
+        }
+    }
+
+    /// Samples a 3x3 patch around the center of the LiDAR depth map (fast & noise-resistant).
     private static func sampleCenterDepth(from depthMap: CVPixelBuffer) -> Double? {
         CVPixelBufferLockBaseAddress(depthMap, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
@@ -335,7 +414,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
         }
     }
 
-    // MARK: - Capture Video (Hardware HEVC + Non-Blocking Frame Drop Guard)
+    // MARK: - Capture Video (Hardware HEVC + AAC Audio + Non-Blocking Frame Drop Guard)
 
     func toggleVideoRecording() {
         if isRecording {
@@ -358,14 +437,15 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
             guard let self else { return }
             do {
                 let writer = try AVAssetWriter(outputURL: tempURL, fileType: .mov)
-                let settings: [String: Any] = [
+
+                let videoSettings: [String: Any] = [
                     AVVideoCodecKey: AVVideoCodecType.hevc,
                     AVVideoWidthKey: width,
                     AVVideoHeightKey: height
                 ]
-                let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
-                input.expectsMediaDataInRealTime = true
-                input.transform = transform
+                let vInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+                vInput.expectsMediaDataInRealTime = true
+                vInput.transform = transform
 
                 let attrs: [String: Any] = [
                     kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
@@ -374,20 +454,37 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
                     kCVPixelBufferMetalCompatibilityKey as String: true
                 ]
                 let adaptor = AVAssetWriterInputPixelBufferAdaptor(
-                    assetWriterInput: input,
+                    assetWriterInput: vInput,
                     sourcePixelBufferAttributes: attrs
                 )
 
-                guard writer.canAdd(input) else { return }
-                writer.add(input)
+                guard writer.canAdd(vInput) else { return }
+                writer.add(vInput)
+
+                let audioSettings: [String: Any] = [
+                    AVFormatIDKey: kAudioFormatMPEG4AAC,
+                    AVSampleRateKey: 44100,
+                    AVNumberOfChannelsKey: 1,
+                    AVEncoderBitRateKey: 128000
+                ]
+                let aInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+                aInput.expectsMediaDataInRealTime = true
+                if writer.canAdd(aInput) {
+                    writer.add(aInput)
+                    self.audioInput = aInput
+                } else {
+                    self.audioInput = nil
+                }
+
                 writer.startWriting()
 
                 self.assetWriter = writer
-                self.videoInput = input
+                self.videoInput = vInput
                 self.pixelBufferAdaptor = adaptor
                 self.recordingURL = tempURL
                 self.recordingStartTimestamp = nil
                 self.isEncodingFrame = false
+                self.isRecordingFlag = true
 
                 DispatchQueue.main.async {
                     self.isRecording = true
@@ -405,7 +502,6 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     private func appendVideoFrame(_ frame: ARFrame) {
-        // Never back up ARKit's frame pool: drop frame cleanly if previous GPU encode is still in flight
         guard !isEncodingFrame else { return }
         isEncodingFrame = true
 
@@ -439,6 +535,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     private func stopVideoRecording() {
+        isRecordingFlag = false
         DispatchQueue.main.async {
             self.isRecording = false
             self.recordingTimer?.invalidate()
@@ -448,14 +545,16 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
         writerQueue.async { [weak self] in
             guard let self,
                   let writer = self.assetWriter,
-                  let input = self.videoInput,
+                  let vInput = self.videoInput,
                   let outputURL = self.recordingURL else { return }
 
-            input.markAsFinished()
+            vInput.markAsFinished()
+            self.audioInput?.markAsFinished()
             writer.finishWriting { [weak self] in
                 guard let self else { return }
                 self.assetWriter = nil
                 self.videoInput = nil
+                self.audioInput = nil
                 self.pixelBufferAdaptor = nil
                 self.recordingStartTimestamp = nil
                 self.isEncodingFrame = false
@@ -473,7 +572,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
                             if success {
                                 self.notificationFeedback.notificationOccurred(.success)
                                 self.markActiveShotCaptured()
-                                self.showToast("Vídeo guardado na galeria")
+                                self.showToast("Vídeo com áudio guardado")
                             } else {
                                 self.showToast("Erro ao guardar vídeo")
                             }

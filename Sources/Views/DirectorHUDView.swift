@@ -3,19 +3,36 @@ import SwiftUI
 struct DirectorHUDView: View {
     @ObservedObject var hudStore: HUDTelemetryStore
     let activeShot: ShotTemplate?
-    let showGrid: Bool
+    let overlayMode: OverlayMode
+    let isRecording: Bool
 
     var body: some View {
         let telemetry = hudStore.telemetry
 
         ZStack {
-            if showGrid {
+            // Grid or Reels/TikTok Safe Zone overlay
+            switch overlayMode {
+            case .thirds:
                 RuleOfThirdsGrid()
                     .stroke(Color.white.opacity(0.18), lineWidth: 0.7)
                     .allowsHitTesting(false)
+            case .reelsSafeZone:
+                ReelsSafeZoneOverlay()
+                    .allowsHitTesting(false)
+            case .none:
+                EmptyView()
             }
 
-            // Center spatial reticle + artificial horizon (EMA-smoothed at 30Hz, zero animation lag)
+            // Vision Face Tracking Brackets
+            if let faceRect = telemetry.detectedFaceRect {
+                FaceTrackerOverlay(
+                    normalizedRect: faceRect,
+                    isGoodFraming: faceRect.minY >= 0.08 && faceRect.midY <= 0.68
+                )
+                .allowsHitTesting(false)
+            }
+
+            // Center spatial reticle + artificial horizon (EMA-smoothed at 30Hz)
             CenterReticleView(
                 rollDegrees: telemetry.rollDegrees,
                 alignmentScore: telemetry.advice.alignmentScore,
@@ -24,8 +41,8 @@ struct DirectorHUDView: View {
             )
             .allowsHitTesting(false)
 
-            // Coaching pill positioned neatly below top bar
-            VStack {
+            // Coaching pill + Motion Pace badge
+            VStack(spacing: 6) {
                 Spacer().frame(height: 68)
 
                 CoachingBanner(
@@ -33,6 +50,13 @@ struct DirectorHUDView: View {
                     activeShot: activeShot
                 )
                 .padding(.horizontal, 16)
+
+                if isRecording || telemetry.motionPace != .still {
+                    MotionPacePill(
+                        pace: telemetry.motionPace,
+                        speedDegPerSec: telemetry.motionSpeedDegPerSec
+                    )
+                }
 
                 Spacer()
             }
@@ -57,6 +81,106 @@ private struct RuleOfThirdsGrid: Shape {
             path.addLine(to: CGPoint(x: w, y: y))
         }
         return path
+    }
+}
+
+private struct ReelsSafeZoneOverlay: View {
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let h = geo.size.height
+            let topMargin = h * 0.13
+            let bottomMargin = h * 0.24
+            let rightMargin = w * 0.16
+
+            ZStack {
+                // Subtle rule-of-thirds inside safe frame
+                RuleOfThirdsGrid()
+                    .stroke(Color.white.opacity(0.12), lineWidth: 0.6)
+
+                // Shaded Reels/TikTok right-side interaction icons zone
+                Rectangle()
+                    .fill(Color.red.opacity(0.12))
+                    .frame(width: rightMargin, height: h - topMargin - bottomMargin)
+                    .position(x: w - rightMargin / 2, y: topMargin + (h - topMargin - bottomMargin) / 2)
+
+                // Shaded Reels/TikTok bottom caption & audio zone
+                Rectangle()
+                    .fill(Color.red.opacity(0.14))
+                    .frame(width: w, height: bottomMargin)
+                    .position(x: w / 2, y: h - bottomMargin / 2)
+
+                // Safe zone dashed outline
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(
+                        Color.cyan.opacity(0.55),
+                        style: StrokeStyle(lineWidth: 1.2, dash: [6, 5])
+                    )
+                    .frame(width: w - rightMargin - 12, height: h - topMargin - bottomMargin)
+                    .position(
+                        x: (w - rightMargin) / 2,
+                        y: topMargin + (h - topMargin - bottomMargin) / 2
+                    )
+            }
+        }
+        .ignoresSafeArea()
+    }
+}
+
+private struct FaceTrackerOverlay: View {
+    let normalizedRect: CGRect
+    let isGoodFraming: Bool
+
+    var body: some View {
+        GeometryReader { geo in
+            let rect = CGRect(
+                x: normalizedRect.origin.x * geo.size.width,
+                y: normalizedRect.origin.y * geo.size.height,
+                width: normalizedRect.size.width * geo.size.width,
+                height: normalizedRect.size.height * geo.size.height
+            )
+
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(
+                    isGoodFraming ? Color.green.opacity(0.85) : Color.orange.opacity(0.9),
+                    lineWidth: 2
+                )
+                .frame(width: rect.width, height: rect.height)
+                .position(x: rect.midX, y: rect.midY)
+        }
+        .ignoresSafeArea()
+    }
+}
+
+private struct MotionPacePill: View {
+    let pace: MotionPace
+    let speedDegPerSec: Double
+
+    private var color: Color {
+        switch pace {
+        case .still: return .white.opacity(0.75)
+        case .cinematic: return .green
+        case .tooFast: return .orange
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(color)
+                .frame(width: 7, height: 7)
+
+            Text(pace.rawValue)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(.white)
+
+            Text("\(Int(speedDegPerSec.rounded()))°/s")
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundColor(.white.opacity(0.75))
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(Capsule().fill(Color.black.opacity(0.6)))
     }
 }
 

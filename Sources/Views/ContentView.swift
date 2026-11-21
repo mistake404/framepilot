@@ -14,14 +14,16 @@ struct ContentView: View {
             DirectorHUDView(
                 hudStore: engine.hudStore,
                 activeShot: engine.activeShot,
-                showGrid: engine.showGrid
+                overlayMode: engine.overlayMode,
+                isRecording: engine.isRecording
             )
 
             // Controls overlay (Top telemetry + Bottom capture dock)
             VStack(spacing: 0) {
                 TopTelemetryBar(
                     hudStore: engine.hudStore,
-                    showGrid: $engine.showGrid
+                    overlayMode: engine.overlayMode,
+                    onCycleOverlay: { engine.cycleOverlayMode() }
                 )
                 .padding(.horizontal, 14)
                 .padding(.top, 8)
@@ -75,13 +77,16 @@ struct ContentView: View {
                     Circle()
                         .fill(Color.red)
                         .frame(width: 8, height: 8)
+                    Image(systemName: "mic.fill")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.white.opacity(0.9))
                     Text(formatDuration(engine.recordingSeconds))
                         .font(.system(size: 13, weight: .bold, design: .monospaced))
                         .foregroundColor(.white)
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 5)
-                .background(Capsule().fill(Color.red.opacity(0.3)))
+                .background(Capsule().fill(Color.red.opacity(0.35)))
             } else {
                 HStack(spacing: 20) {
                     ForEach(CaptureMode.allCases) { mode in
@@ -155,12 +160,13 @@ struct ContentView: View {
 
 private struct TopTelemetryBar: View {
     @ObservedObject var hudStore: HUDTelemetryStore
-    @Binding var showGrid: Bool
+    let overlayMode: OverlayMode
+    let onCycleOverlay: () -> Void
 
     var body: some View {
         let telemetry = hudStore.telemetry
 
-        HStack(spacing: 8) {
+        HStack(spacing: 7) {
             telemetryPill(
                 icon: telemetry.hasLidarSupport ? "dot.radiowaves.left.and.right" : "ruler",
                 text: telemetry.formattedDistance,
@@ -181,14 +187,17 @@ private struct TopTelemetryBar: View {
 
             Spacer()
 
-            Button {
-                showGrid.toggle()
-            } label: {
-                Image(systemName: showGrid ? "grid" : "grid.circle")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundColor(showGrid ? .yellow : .white.opacity(0.7))
-                    .frame(width: 34, height: 34)
-                    .background(Circle().fill(Color.black.opacity(0.55)))
+            Button(action: onCycleOverlay) {
+                HStack(spacing: 4) {
+                    Image(systemName: overlayMode.iconName)
+                        .font(.system(size: 12, weight: .semibold))
+                    Text(overlayMode.rawValue)
+                        .font(.system(size: 10, weight: .bold))
+                }
+                .foregroundColor(overlayMode == .reelsSafeZone ? .cyan : (overlayMode == .thirds ? .yellow : .white.opacity(0.7)))
+                .padding(.horizontal, 9)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(Color.black.opacity(0.58)))
             }
         }
     }
@@ -203,7 +212,7 @@ private struct TopTelemetryBar: View {
                 .font(.system(size: 11, weight: .semibold, design: .monospaced))
                 .foregroundColor(.white)
         }
-        .padding(.horizontal, 9)
+        .padding(.horizontal, 8)
         .padding(.vertical, 6)
         .background(Capsule().fill(Color.black.opacity(0.58)))
     }

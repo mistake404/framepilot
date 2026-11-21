@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 enum ShotCoachEngine {
 
@@ -6,6 +7,12 @@ enum ShotCoachEngine {
         if lumens < 420 { return .low }
         if lumens > 1850 { return .bright }
         return .balanced
+    }
+
+    static func classifyMotionPace(speedDegPerSec: Double) -> MotionPace {
+        if speedDegPerSec < 6.0 { return .still }
+        if speedDegPerSec <= 28.0 { return .cinematic }
+        return .tooFast
     }
 
     static func detectShotKind(distanceMeters: Double?, pitchDegrees: Double) -> ShotKind {
@@ -26,14 +33,48 @@ enum ShotCoachEngine {
         pitchDegrees: Double,
         rollDegrees: Double,
         lighting: LightingCondition,
+        motionPace: MotionPace,
+        detectedFaceRect: CGRect?,
+        isRecording: Bool,
         target: ShotTemplate?
     ) -> CoachingAdvice {
+        // Live recording motion guard takes priority so video clips stay cinematic
+        if isRecording && motionPace == .tooFast {
+            return CoachingAdvice(
+                primaryInstruction: "Abranda o movimento da câmara",
+                secondaryHint: "Mantém a rotação suave para um resultado cinematográfico.",
+                alignmentScore: 0.45,
+                isLocked: false
+            )
+        }
+
+        // Face framing check (headroom & Reels bottom caption safe zone)
+        if let face = detectedFaceRect {
+            if face.minY < 0.08 {
+                return CoachingAdvice(
+                    primaryInstruction: "Dá mais ar acima da cabeça",
+                    secondaryHint: "Inclina ligeiramente para cima ou afasta-te um pouco.",
+                    alignmentScore: 0.68,
+                    isLocked: false
+                )
+            }
+            if face.midY > 0.68 {
+                return CoachingAdvice(
+                    primaryInstruction: "Sobe o rosto para o terço superior",
+                    secondaryHint: "Evita a zona inferior de legendas no Reels/TikTok.",
+                    alignmentScore: 0.68,
+                    isLocked: false
+                )
+            }
+        }
+
         guard let target else {
             return evaluateFreeMode(
                 distanceMeters: distanceMeters,
                 pitchDegrees: pitchDegrees,
                 rollDegrees: rollDegrees,
-                lighting: lighting
+                lighting: lighting,
+                hasFace: detectedFaceRect != nil
             )
         }
 
@@ -44,9 +85,9 @@ enum ShotCoachEngine {
         // 2. Pitch score
         let pitchDelta: Double
         if pitchDegrees < target.targetPitchRange.lowerBound {
-            pitchDelta = target.targetPitchRange.lowerBound - pitchDegrees // positive = tilt up
+            pitchDelta = target.targetPitchRange.lowerBound - pitchDegrees
         } else if pitchDegrees > target.targetPitchRange.upperBound {
-            pitchDelta = target.targetPitchRange.upperBound - pitchDegrees // negative = tilt down
+            pitchDelta = target.targetPitchRange.upperBound - pitchDegrees
         } else {
             pitchDelta = 0
         }
@@ -57,9 +98,9 @@ enum ShotCoachEngine {
         let distanceScore: Double
         if let d = distanceMeters {
             if d < target.targetDistanceRange.lowerBound {
-                distanceDelta = target.targetDistanceRange.lowerBound - d // positive = step back
+                distanceDelta = target.targetDistanceRange.lowerBound - d
             } else if d > target.targetDistanceRange.upperBound {
-                distanceDelta = target.targetDistanceRange.upperBound - d // negative = step closer
+                distanceDelta = target.targetDistanceRange.upperBound - d
             } else {
                 distanceDelta = 0
             }
@@ -73,15 +114,15 @@ enum ShotCoachEngine {
         let isLocked = rollExcess == 0 && abs(pitchDelta) <= 2.0 && abs(distanceDelta ?? 0) <= 0.12
 
         if isLocked {
+            let lockedTitle = isRecording ? "Gravação perfeita — mantém o ritmo" : "Ângulo perfeito — dispara!"
             return CoachingAdvice(
-                primaryInstruction: "Ângulo perfeito — dispara!",
+                primaryInstruction: lockedTitle,
                 secondaryHint: "\(target.movementHint) • \(target.directorTip)",
                 alignmentScore: 1.0,
                 isLocked: true
             )
         }
 
-        // Prioritize the single most actionable instruction
         if rollExcess > 1.5 {
             let dir = rollDegrees > 0 ? "para a esquerda" : "para a direita"
             return CoachingAdvice(
@@ -133,7 +174,8 @@ enum ShotCoachEngine {
         distanceMeters: Double?,
         pitchDegrees: Double,
         rollDegrees: Double,
-        lighting: LightingCondition
+        lighting: LightingCondition,
+        hasFace: Bool
     ) -> CoachingAdvice {
         let detected = detectShotKind(distanceMeters: distanceMeters, pitchDegrees: pitchDegrees)
 
@@ -156,9 +198,10 @@ enum ShotCoachEngine {
             )
         }
 
+        let faceTag = hasFace ? "Rosto enquadrado • " : ""
         return CoachingAdvice(
             primaryInstruction: "\(detected.rawValue) pronto",
-            secondaryHint: "Horizonte nivelado • Experimenta variar para Contrapicado ou Detalhe.",
+            secondaryHint: "\(faceTag)Horizonte nivelado • Varia para Contrapicado ou Detalhe.",
             alignmentScore: 0.92,
             isLocked: true
         )

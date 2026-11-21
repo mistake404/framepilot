@@ -24,6 +24,8 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>O FramePilot usa a câmara e o sensor LiDAR para medir distâncias, ângulos e guiar os teus planos em tempo real.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>O FramePilot usa o microfone para gravar áudio real nos teus vídeos.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>O FramePilot precisa de permissão para guardar as fotos e vídeos capturados na tua galeria.</string>
 	<key>UIApplicationSceneManifest</key>
