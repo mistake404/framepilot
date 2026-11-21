@@ -216,7 +216,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
 
         // Compute lens switch-over multipliers (0.5x, 1x, 2x, 5x)
         if device.deviceType == .builtInTripleCamera || device.deviceType == .builtInDualWideCamera {
-            wideZoomFactor = device.virtualDeviceSwitchOverVideoFactors.first?.doubleValue ?? 2.0
+            wideZoomFactor = device.virtualDeviceSwitchOverVideoZoomFactors.first?.doubleValue ?? 2.0
         } else {
             wideZoomFactor = 1.0
         }
