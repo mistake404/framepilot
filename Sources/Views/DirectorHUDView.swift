@@ -1,11 +1,13 @@
 import SwiftUI
 
 struct DirectorHUDView: View {
-    let telemetry: CameraTelemetry
+    @ObservedObject var hudStore: HUDTelemetryStore
     let activeShot: ShotTemplate?
     let showGrid: Bool
 
     var body: some View {
+        let telemetry = hudStore.telemetry
+
         ZStack {
             if showGrid {
                 RuleOfThirdsGrid()
@@ -13,7 +15,7 @@ struct DirectorHUDView: View {
                     .allowsHitTesting(false)
             }
 
-            // Center spatial reticle + artificial horizon
+            // Center spatial reticle + artificial horizon (EMA-smoothed at 30Hz, zero animation lag)
             CenterReticleView(
                 rollDegrees: telemetry.rollDegrees,
                 alignmentScore: telemetry.advice.alignmentScore,
@@ -72,7 +74,6 @@ private struct CenterReticleView: View {
 
     var body: some View {
         ZStack {
-            // Outer alignment progress ring
             Circle()
                 .stroke(Color.white.opacity(0.22), lineWidth: 2)
                 .frame(width: 78, height: 78)
@@ -82,16 +83,12 @@ private struct CenterReticleView: View {
                 .stroke(accentColor, style: StrokeStyle(lineWidth: 3, lineCap: .round))
                 .rotationEffect(.degrees(-90))
                 .frame(width: 78, height: 78)
-                .animation(.easeOut(duration: 0.12), value: alignmentScore)
 
-            // Artificial horizon bar
             Rectangle()
                 .fill(isHorizonLevel ? Color.green : Color.white.opacity(0.8))
                 .frame(width: 52, height: 2)
                 .rotationEffect(.degrees(-rollDegrees))
-                .animation(.easeOut(duration: 0.08), value: rollDegrees)
 
-            // Center LiDAR sampling dot
             Circle()
                 .fill(accentColor)
                 .frame(width: 6, height: 6)

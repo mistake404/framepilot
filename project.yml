@@ -11,8 +11,8 @@ settings:
     SWIFT_VERSION: "5.9"
     TARGETED_DEVICE_FAMILY: "1"
     SUPPORTS_MACCATALYST: "NO"
-    MARKETING_VERSION: "0.1.0"
-    CURRENT_PROJECT_VERSION: "1"
+    MARKETING_VERSION: "0.2.0"
+    CURRENT_PROJECT_VERSION: "2"
 
 targets:
   FramePilot:
@@ -35,6 +35,7 @@ targets:
       - sdk: AVFoundation.framework
       - sdk: CoreMotion.framework
       - sdk: CoreImage.framework
+      - sdk: Metal.framework
       - sdk: Photos.framework
       - sdk: SceneKit.framework
       - sdk: SwiftUI.framework

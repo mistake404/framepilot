@@ -6,22 +6,25 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
-            // Full-screen AR / LiDAR camera preview
+            // Full-screen 60fps AR / LiDAR camera preview
             ARCameraView(session: engine.arSession)
                 .ignoresSafeArea()
 
-            // Spatial HUD + Coaching overlay
+            // Isolated high-frequency HUD (does not re-render ContentView)
             DirectorHUDView(
-                telemetry: engine.telemetry,
+                hudStore: engine.hudStore,
                 activeShot: engine.activeShot,
                 showGrid: engine.showGrid
             )
 
             // Controls overlay (Top telemetry + Bottom capture dock)
             VStack(spacing: 0) {
-                topTelemetryBar
-                    .padding(.horizontal, 14)
-                    .padding(.top, 8)
+                TopTelemetryBar(
+                    hudStore: engine.hudStore,
+                    showGrid: $engine.showGrid
+                )
+                .padding(.horizontal, 14)
+                .padding(.top, 8)
 
                 Spacer()
 
@@ -65,62 +68,8 @@ struct ContentView: View {
         }
     }
 
-    private var topTelemetryBar: some View {
-        HStack(spacing: 8) {
-            // LiDAR Distance pill
-            telemetryPill(
-                icon: engine.telemetry.hasLidarSupport ? "dot.radiowaves.left.and.right" : "ruler",
-                text: engine.telemetry.formattedDistance,
-                accent: engine.telemetry.lidarDistanceMeters != nil ? .cyan : .gray
-            )
-
-            // Pitch angle pill
-            telemetryPill(
-                icon: "angle",
-                text: engine.telemetry.formattedPitch,
-                accent: .yellow
-            )
-
-            // Detected shot pill
-            telemetryPill(
-                icon: engine.telemetry.detectedShotKind.iconName,
-                text: engine.telemetry.detectedShotKind.rawValue,
-                accent: .white
-            )
-
-            Spacer()
-
-            // Grid toggle button
-            Button {
-                engine.showGrid.toggle()
-            } label: {
-                Image(systemName: engine.showGrid ? "grid" : "grid.circle")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundColor(engine.showGrid ? .yellow : .white.opacity(0.7))
-                    .frame(width: 34, height: 34)
-                    .background(Circle().fill(Color.black.opacity(0.55)))
-            }
-        }
-    }
-
-    private func telemetryPill(icon: String, text: String, accent: Color) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: icon)
-                .font(.system(size: 11, weight: .bold))
-                .foregroundColor(accent)
-
-            Text(text)
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                .foregroundColor(.white)
-        }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 6)
-        .background(Capsule().fill(Color.black.opacity(0.58)))
-    }
-
     private var bottomCaptureDock: some View {
         VStack(spacing: 12) {
-            // Mode selector (Photo / Video) or Recording timer
             if engine.isRecording {
                 HStack(spacing: 6) {
                     Circle()
@@ -149,7 +98,6 @@ struct ContentView: View {
             }
 
             HStack {
-                // Scene Pack button
                 Button {
                     showPackSheet = true
                 } label: {
@@ -166,55 +114,25 @@ struct ContentView: View {
 
                 Spacer()
 
-                // Shutter / Record button
-                Button {
+                CaptureShutterButton(
+                    hudStore: engine.hudStore,
+                    captureMode: engine.captureMode,
+                    isRecording: engine.isRecording
+                ) {
                     if engine.captureMode == .photo {
                         engine.capturePhoto()
                     } else {
                         engine.toggleVideoRecording()
                     }
-                } label: {
-                    ZStack {
-                        Circle()
-                            .stroke(engine.telemetry.advice.isLocked ? Color.green : Color.white, lineWidth: 4)
-                            .frame(width: 74, height: 74)
-
-                        if engine.captureMode == .video {
-                            RoundedRectangle(cornerRadius: engine.isRecording ? 8 : 30, style: .continuous)
-                                .fill(Color.red)
-                                .frame(
-                                    width: engine.isRecording ? 28 : 58,
-                                    height: engine.isRecording ? 28 : 58
-                                )
-                                .animation(.easeInOut(duration: 0.18), value: engine.isRecording)
-                        } else {
-                            Circle()
-                                .fill(Color.white)
-                                .frame(width: 58, height: 58)
-                        }
-                    }
                 }
 
                 Spacer()
 
-                // Progress / Lighting badge
-                VStack(spacing: 3) {
-                    Image(systemName: engine.telemetry.lighting.iconName)
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(engine.telemetry.lighting == .low ? .orange : .yellow)
-
-                    if engine.selectedPack.shots.isEmpty {
-                        Text("Livre")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundColor(.white.opacity(0.8))
-                    } else {
-                        Text("\(engine.completedShotIds.count)/\(engine.selectedPack.shots.count)")
-                            .font(.system(size: 11, weight: .bold, design: .monospaced))
-                            .foregroundColor(.white)
-                    }
-                }
-                .frame(width: 62, height: 50)
-                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.white.opacity(0.14)))
+                LightingProgressBadge(
+                    hudStore: engine.hudStore,
+                    completedCount: engine.completedShotIds.count,
+                    totalCount: engine.selectedPack.shots.count
+                )
             }
             .padding(.horizontal, 24)
         }
@@ -232,5 +150,120 @@ struct ContentView: View {
 
     private func formatDuration(_ seconds: Int) -> String {
         String(format: "%02d:%02d", seconds / 60, seconds % 60)
+    }
+}
+
+private struct TopTelemetryBar: View {
+    @ObservedObject var hudStore: HUDTelemetryStore
+    @Binding var showGrid: Bool
+
+    var body: some View {
+        let telemetry = hudStore.telemetry
+
+        HStack(spacing: 8) {
+            telemetryPill(
+                icon: telemetry.hasLidarSupport ? "dot.radiowaves.left.and.right" : "ruler",
+                text: telemetry.formattedDistance,
+                accent: telemetry.lidarDistanceMeters != nil ? .cyan : .gray
+            )
+
+            telemetryPill(
+                icon: "angle",
+                text: telemetry.formattedPitch,
+                accent: .yellow
+            )
+
+            telemetryPill(
+                icon: telemetry.detectedShotKind.iconName,
+                text: telemetry.detectedShotKind.rawValue,
+                accent: .white
+            )
+
+            Spacer()
+
+            Button {
+                showGrid.toggle()
+            } label: {
+                Image(systemName: showGrid ? "grid" : "grid.circle")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(showGrid ? .yellow : .white.opacity(0.7))
+                    .frame(width: 34, height: 34)
+                    .background(Circle().fill(Color.black.opacity(0.55)))
+            }
+        }
+    }
+
+    private func telemetryPill(icon: String, text: String, accent: Color) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(accent)
+
+            Text(text)
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundColor(.white)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .background(Capsule().fill(Color.black.opacity(0.58)))
+    }
+}
+
+private struct CaptureShutterButton: View {
+    @ObservedObject var hudStore: HUDTelemetryStore
+    let captureMode: CaptureMode
+    let isRecording: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .stroke(hudStore.telemetry.advice.isLocked ? Color.green : Color.white, lineWidth: 4)
+                    .frame(width: 74, height: 74)
+
+                if captureMode == .video {
+                    RoundedRectangle(cornerRadius: isRecording ? 8 : 30, style: .continuous)
+                        .fill(Color.red)
+                        .frame(
+                            width: isRecording ? 28 : 58,
+                            height: isRecording ? 28 : 58
+                        )
+                        .animation(.easeInOut(duration: 0.18), value: isRecording)
+                } else {
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: 58, height: 58)
+                }
+            }
+        }
+    }
+}
+
+private struct LightingProgressBadge: View {
+    @ObservedObject var hudStore: HUDTelemetryStore
+    let completedCount: Int
+    let totalCount: Int
+
+    var body: some View {
+        let lighting = hudStore.telemetry.lighting
+
+        VStack(spacing: 3) {
+            Image(systemName: lighting.iconName)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(lighting == .low ? .orange : .yellow)
+
+            if totalCount == 0 {
+                Text("Livre")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.8))
+            } else {
+                Text("\(completedCount)/\(totalCount)")
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .foregroundColor(.white)
+            }
+        }
+        .frame(width: 62, height: 50)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.white.opacity(0.14)))
     }
 }

@@ -3,14 +3,20 @@ import Combine
 import ARKit
 import CoreMotion
 import CoreImage
+import Metal
 import AVFoundation
 import Photos
 import UIKit
 
+/// Isolated high-frequency telemetry store so 30Hz HUD updates never rebuild the main camera view tree.
+final class HUDTelemetryStore: ObservableObject {
+    @Published var telemetry = CameraTelemetry()
+}
+
 final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
     let arSession = ARSession()
+    let hudStore = HUDTelemetryStore()
 
-    @Published var telemetry = CameraTelemetry()
     @Published var selectedPack: ScenePack = ScenePack.presets[0]
     @Published var activeShotIndex: Int = 0
     @Published var completedShotIds: Set<String> = []
@@ -21,8 +27,23 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
     @Published var showGrid: Bool = true
 
     private let motionManager = CMMotionManager()
-    private let ciContext = CIContext()
-    private let writerQueue = DispatchQueue(label: "com.framepilot.videoWriter")
+    private let motionQueue: OperationQueue = {
+        let q = OperationQueue()
+        q.name = "com.framepilot.motion"
+        q.qualityOfService = .userInteractive
+        q.maxConcurrentOperationCount = 1
+        return q
+    }()
+    private let writerQueue = DispatchQueue(label: "com.framepilot.videoWriter", qos: .userInitiated)
+    private let sensorLock = NSLock()
+
+    // Metal-backed CIContext for GPU-accelerated photo & video frame rendering
+    private let ciContext: CIContext = {
+        if let device = MTLCreateSystemDefaultDevice() {
+            return CIContext(mtlDevice: device, options: [.cacheIntermediates: false])
+        }
+        return CIContext(options: [.cacheIntermediates: false])
+    }()
 
     private var assetWriter: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
@@ -30,11 +51,23 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
     private var recordingURL: URL?
     private var recordingStartTimestamp: CMTime?
     private var recordingTimer: Timer?
+    private var isEncodingFrame: Bool = false
 
-    private var latestPitchDegrees: Double = 0
-    private var latestRollDegrees: Double = 0
-    private var lastTelemetryUpdate: TimeInterval = 0
+    // Smoothed sensor state (protected by sensorLock)
+    private var smoothedPitchDegrees: Double = 0
+    private var smoothedRollDegrees: Double = 0
+    private var smoothedDistanceMeters: Double?
+    private var hasMotionSample: Bool = false
+
+    private var lastHUDUpdate: TimeInterval = 0
+    private var lastAdviceUpdate: TimeInterval = 0
+    private var cachedAdvice: CoachingAdvice = .idle
+    private var cachedLighting: LightingCondition = .balanced
+    private var cachedDetectedShot: ShotKind = .medium
     private var wasLocked: Bool = false
+
+    // Thread-safe snapshot of activeShot for ARSession callback
+    private var currentTargetShot: ShotTemplate?
 
     private let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
     private let notificationFeedback = UINotificationFeedbackGenerator()
@@ -49,12 +82,20 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
     override init() {
         super.init()
         arSession.delegate = self
+        currentTargetShot = activeShot
     }
 
     func start() {
         let config = ARWorldTrackingConfiguration()
         config.isLightEstimationEnabled = true
         config.worldAlignment = .gravity
+        config.environmentTexturing = .none
+        config.planeDetection = []
+
+        // Prefer 60fps video format for native-like viewfinder fluidity
+        if let best60fps = Self.selectOptimalVideoFormat() {
+            config.videoFormat = best60fps
+        }
 
         var lidarAvailable = false
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
@@ -66,7 +107,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
         }
 
         DispatchQueue.main.async {
-            self.telemetry.hasLidarSupport = lidarAvailable
+            self.hudStore.telemetry.hasLidarSupport = lidarAvailable
         }
 
         arSession.run(config, options: [.resetTracking, .removeExistingAnchors])
@@ -89,6 +130,8 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
         if let first = pack.shots.first {
             captureMode = first.preferredMode
         }
+        currentTargetShot = activeShot
+        lastAdviceUpdate = 0
         wasLocked = false
     }
 
@@ -96,6 +139,8 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
         guard selectedPack.shots.indices.contains(index) else { return }
         activeShotIndex = index
         captureMode = selectedPack.shots[index].preferredMode
+        currentTargetShot = activeShot
+        lastAdviceUpdate = 0
         wasLocked = false
     }
 
@@ -107,24 +152,45 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
         }
     }
 
-    // MARK: - CoreMotion (Pitch & Roll)
+    private static func selectOptimalVideoFormat() -> ARConfiguration.VideoFormat? {
+        let formats = ARWorldTrackingConfiguration.supportedVideoFormats
+        // Prefer 60fps formats; among 60fps, pick 1920x1080 or highest resolution up to 1080p for zero thermal throttling
+        let sixtyFps = formats.filter { $0.framesPerSecond >= 60 }
+        if !sixtyFps.isEmpty {
+            return sixtyFps.min { lhs, rhs in
+                let lhsDiff = abs(lhs.imageResolution.width - 1920)
+                let rhsDiff = abs(rhs.imageResolution.width - 1920)
+                return lhsDiff < rhsDiff
+            }
+        }
+        return formats.first
+    }
+
+    // MARK: - CoreMotion (Background Queue + Exponential Smoothing)
 
     private func startMotionUpdates() {
         guard motionManager.isDeviceMotionAvailable else { return }
-        motionManager.deviceMotionUpdateInterval = 1.0 / 30.0
-        motionManager.startDeviceMotionUpdates(to: .main) { [weak self] motion, _ in
+        motionManager.deviceMotionUpdateInterval = 1.0 / 60.0
+        motionManager.startDeviceMotionUpdates(to: motionQueue) { [weak self] motion, _ in
             guard let self, let g = motion?.gravity else { return }
-            // Pitch: + degrees = looking up (contrapicado), - degrees = looking down (picado)
-            let pitchRad = atan2(g.z, hypot(g.x, g.y))
-            let pitchDeg = pitchRad * 180.0 / .pi
 
-            // Roll relative to nearest 90° so horizon works in portrait and landscape
+            let pitchDeg = atan2(g.z, hypot(g.x, g.y)) * 180.0 / .pi
             let rawRollDeg = atan2(g.x, -g.y) * 180.0 / .pi
             let nearestRightAngle = (rawRollDeg / 90.0).rounded() * 90.0
             let horizonErrorDeg = rawRollDeg - nearestRightAngle
 
-            self.latestPitchDegrees = pitchDeg
-            self.latestRollDegrees = horizonErrorDeg
+            self.sensorLock.lock()
+            if self.hasMotionSample {
+                // Smooth low-pass filter (responsive, zero jitter)
+                let alpha = 0.25
+                self.smoothedPitchDegrees += alpha * (pitchDeg - self.smoothedPitchDegrees)
+                self.smoothedRollDegrees += alpha * (horizonErrorDeg - self.smoothedRollDegrees)
+            } else {
+                self.smoothedPitchDegrees = pitchDeg
+                self.smoothedRollDegrees = horizonErrorDeg
+                self.hasMotionSample = true
+            }
+            self.sensorLock.unlock()
         }
     }
 
@@ -135,35 +201,61 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
             appendVideoFrame(frame)
         }
 
+        // Update HUD reticle & horizon at ~30Hz (33ms) for buttery smoothness
         let now = frame.timestamp
-        guard now - lastTelemetryUpdate >= 0.065 else { return }
-        lastTelemetryUpdate = now
+        guard now - lastHUDUpdate >= 0.033 else { return }
+        lastHUDUpdate = now
 
-        let depthMap = frame.smoothedSceneDepth?.depthMap ?? frame.sceneDepth?.depthMap
-        let distance = depthMap.flatMap { Self.sampleCenterDepth(from: $0) }
-        let lumens = Double(frame.lightEstimate?.ambientIntensity ?? 1000)
-        let lighting = ShotCoachEngine.classifyLighting(lumens: lumens)
+        sensorLock.lock()
+        let pitch = smoothedPitchDegrees
+        let roll = smoothedRollDegrees
+        sensorLock.unlock()
 
-        let pitch = latestPitchDegrees
-        let roll = latestRollDegrees
-        let detected = ShotCoachEngine.detectShotKind(distanceMeters: distance, pitchDegrees: pitch)
-        let target = activeShot
-        let advice = ShotCoachEngine.evaluate(
-            distanceMeters: distance,
-            pitchDegrees: pitch,
-            rollDegrees: roll,
-            lighting: lighting,
-            target: target
-        )
+        // Sample LiDAR depth & recompute coaching advice at ~8Hz (125ms) to avoid jitter and save CPU
+        let shouldUpdateAdvice = (now - lastAdviceUpdate >= 0.125)
+        var currentDistance = smoothedDistanceMeters
+
+        if shouldUpdateAdvice {
+            lastAdviceUpdate = now
+
+            let depthMap = frame.smoothedSceneDepth?.depthMap ?? frame.sceneDepth?.depthMap
+            if let rawDistance = depthMap.flatMap({ Self.sampleCenterDepth(from: $0) }) {
+                if let prev = smoothedDistanceMeters {
+                    currentDistance = prev + 0.35 * (rawDistance - prev)
+                } else {
+                    currentDistance = rawDistance
+                }
+                smoothedDistanceMeters = currentDistance
+            } else {
+                currentDistance = nil
+                smoothedDistanceMeters = nil
+            }
+
+            let lumens = Double(frame.lightEstimate?.ambientIntensity ?? 1000)
+            cachedLighting = ShotCoachEngine.classifyLighting(lumens: lumens)
+            cachedDetectedShot = ShotCoachEngine.detectShotKind(distanceMeters: currentDistance, pitchDegrees: pitch)
+            cachedAdvice = ShotCoachEngine.evaluate(
+                distanceMeters: currentDistance,
+                pitchDegrees: pitch,
+                rollDegrees: roll,
+                lighting: cachedLighting,
+                target: currentTargetShot
+            )
+        }
+
+        let advice = cachedAdvice
+        let lighting = cachedLighting
+        let detected = cachedDetectedShot
 
         DispatchQueue.main.async {
-            self.telemetry.lidarDistanceMeters = distance
-            self.telemetry.pitchDegrees = pitch
-            self.telemetry.rollDegrees = roll
-            self.telemetry.ambientLumens = lumens
-            self.telemetry.lighting = lighting
-            self.telemetry.detectedShotKind = detected
-            self.telemetry.advice = advice
+            var next = self.hudStore.telemetry
+            next.pitchDegrees = pitch
+            next.rollDegrees = roll
+            next.lidarDistanceMeters = currentDistance
+            next.lighting = lighting
+            next.detectedShotKind = detected
+            next.advice = advice
+            self.hudStore.telemetry = next
 
             if advice.isLocked && !self.wasLocked {
                 self.impactFeedback.impactOccurred()
@@ -172,7 +264,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
         }
     }
 
-    /// Samples a 5x5 patch around the center of the LiDAR depth map and returns median distance in meters.
+    /// Samples a 3x3 cross around the center of the LiDAR depth map (fast & noise-resistant).
     private static func sampleCenterDepth(from depthMap: CVPixelBuffer) -> Double? {
         CVPixelBufferLockBaseAddress(depthMap, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
@@ -181,18 +273,18 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
         let width = CVPixelBufferGetWidth(depthMap)
         let height = CVPixelBufferGetHeight(depthMap)
         let bytesPerRow = CVPixelBufferGetBytesPerRow(depthMap)
-        let centerX = width / 2
-        let centerY = height / 2
+        let cx = width / 2
+        let cy = height / 2
 
         var samples: [Float] = []
-        samples.reserveCapacity(25)
+        samples.reserveCapacity(9)
 
-        for dy in -2...2 {
-            let y = centerY + dy
+        for dy in -1...1 {
+            let y = cy + dy
             guard y >= 0, y < height else { continue }
             let rowPtr = baseAddress.advanced(by: y * bytesPerRow).assumingMemoryBound(to: Float32.self)
-            for dx in -2...2 {
-                let x = centerX + dx
+            for dx in -1...1 {
+                let x = cx + dx
                 guard x >= 0, x < width else { continue }
                 let value = rowPtr[x]
                 if value.isFinite && value > 0.08 && value < 8.0 {
@@ -206,41 +298,44 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
         return Double(samples[samples.count / 2])
     }
 
-    // MARK: - Capture Photo
+    // MARK: - Capture Photo (Off-Main-Thread GPU Encoding)
 
     func capturePhoto() {
         guard let frame = arSession.currentFrame else { return }
         let pixelBuffer = frame.capturedImage
         let orientation = currentImageOrientation()
 
-        let ciImage = CIImage(cvPixelBuffer: pixelBuffer).oriented(orientation)
-        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else { return }
-        let uiImage = UIImage(cgImage: cgImage)
-
-        PHPhotoLibrary.requestAuthorization(for: .addOnly) { [weak self] status in
+        writerQueue.async { [weak self] in
             guard let self else { return }
-            guard status == .authorized || status == .limited else {
-                self.showToast("Permite acesso à galeria nas Definições")
-                return
-            }
+            let ciImage = CIImage(cvPixelBuffer: pixelBuffer).oriented(orientation)
+            guard let cgImage = self.ciContext.createCGImage(ciImage, from: ciImage.extent) else { return }
+            let uiImage = UIImage(cgImage: cgImage)
 
-            PHPhotoLibrary.shared().performChanges({
-                PHAssetChangeRequest.creationRequestForAsset(from: uiImage)
-            }) { success, _ in
-                DispatchQueue.main.async {
-                    if success {
-                        self.notificationFeedback.notificationOccurred(.success)
-                        self.markActiveShotCaptured()
-                        self.showToast("Foto guardada na galeria")
-                    } else {
-                        self.showToast("Erro ao guardar foto")
+            PHPhotoLibrary.requestAuthorization(for: .addOnly) { [weak self] status in
+                guard let self else { return }
+                guard status == .authorized || status == .limited else {
+                    self.showToast("Permite acesso à galeria nas Definições")
+                    return
+                }
+
+                PHPhotoLibrary.shared().performChanges({
+                    PHAssetChangeRequest.creationRequestForAsset(from: uiImage)
+                }) { success, _ in
+                    DispatchQueue.main.async {
+                        if success {
+                            self.notificationFeedback.notificationOccurred(.success)
+                            self.markActiveShotCaptured()
+                            self.showToast("Foto guardada na galeria")
+                        } else {
+                            self.showToast("Erro ao guardar foto")
+                        }
                     }
                 }
             }
         }
     }
 
-    // MARK: - Capture Video
+    // MARK: - Capture Video (Hardware HEVC + Non-Blocking Frame Drop Guard)
 
     func toggleVideoRecording() {
         if isRecording {
@@ -264,7 +359,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
             do {
                 let writer = try AVAssetWriter(outputURL: tempURL, fileType: .mov)
                 let settings: [String: Any] = [
-                    AVVideoCodecKey: AVVideoCodecType.h264,
+                    AVVideoCodecKey: AVVideoCodecType.hevc,
                     AVVideoWidthKey: width,
                     AVVideoHeightKey: height
                 ]
@@ -275,7 +370,8 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
                 let attrs: [String: Any] = [
                     kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
                     kCVPixelBufferWidthKey as String: width,
-                    kCVPixelBufferHeightKey as String: height
+                    kCVPixelBufferHeightKey as String: height,
+                    kCVPixelBufferMetalCompatibilityKey as String: true
                 ]
                 let adaptor = AVAssetWriterInputPixelBufferAdaptor(
                     assetWriterInput: input,
@@ -291,6 +387,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
                 self.pixelBufferAdaptor = adaptor
                 self.recordingURL = tempURL
                 self.recordingStartTimestamp = nil
+                self.isEncodingFrame = false
 
                 DispatchQueue.main.async {
                     self.isRecording = true
@@ -308,12 +405,18 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     private func appendVideoFrame(_ frame: ARFrame) {
+        // Never back up ARKit's frame pool: drop frame cleanly if previous GPU encode is still in flight
+        guard !isEncodingFrame else { return }
+        isEncodingFrame = true
+
         let pixelBuffer = frame.capturedImage
         let timestamp = CMTime(seconds: frame.timestamp, preferredTimescale: 600)
 
         writerQueue.async { [weak self] in
-            guard let self,
-                  let writer = self.assetWriter,
+            guard let self else { return }
+            defer { self.isEncodingFrame = false }
+
+            guard let writer = self.assetWriter,
                   let input = self.videoInput,
                   let adaptor = self.pixelBufferAdaptor,
                   writer.status == .writing,
@@ -355,6 +458,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
                 self.videoInput = nil
                 self.pixelBufferAdaptor = nil
                 self.recordingStartTimestamp = nil
+                self.isEncodingFrame = false
 
                 PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
                     guard status == .authorized || status == .limited else {
@@ -386,6 +490,8 @@ final class SpatialCameraEngine: NSObject, ObservableObject, ARSessionDelegate {
         if activeShotIndex + 1 < selectedPack.shots.count {
             activeShotIndex += 1
             captureMode = selectedPack.shots[activeShotIndex].preferredMode
+            currentTargetShot = activeShot
+            lastAdviceUpdate = 0
             wasLocked = false
         }
     }

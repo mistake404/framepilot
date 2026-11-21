@@ -8,8 +8,12 @@ struct ARCameraView: UIViewRepresentable {
     func makeUIView(context: Context) -> ARSCNView {
         let view = ARSCNView(frame: .zero)
         view.session = session
+        view.preferredFramesPerSecond = 60
+        view.antialiasingMode = .none
+        view.autoenablesDefaultLighting = false
         view.automaticallyUpdatesLighting = false
         view.rendersMotionBlur = false
+        view.showsStatistics = false
         view.contentMode = .scaleAspectFill
         return view
     }
