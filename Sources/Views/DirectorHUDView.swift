@@ -4,12 +4,19 @@ struct DirectorHUDView: View {
     @ObservedObject var hudStore: HUDTelemetryStore
     let activeShot: ShotTemplate?
     let overlayMode: OverlayMode
+    let aspectMask: AspectMask
     let isRecording: Bool
 
     var body: some View {
         let telemetry = hudStore.telemetry
 
         ZStack {
+            // Aspect ratio framing mask (4:5 Feed / 16:9 Cinema)
+            if let ratio = aspectMask.portraitRatio {
+                AspectMaskOverlay(widthOverHeight: ratio, label: aspectMask.rawValue)
+                    .allowsHitTesting(false)
+            }
+
             // Grid or Reels/TikTok Safe Zone overlay
             switch overlayMode {
             case .thirds:
@@ -62,6 +69,37 @@ struct DirectorHUDView: View {
             }
             .allowsHitTesting(false)
         }
+    }
+}
+
+private struct AspectMaskOverlay: View {
+    let widthOverHeight: CGFloat
+    let label: String
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let h = geo.size.height
+            let targetHeight = min(h, w / widthOverHeight)
+            let barHeight = max(0, (h - targetHeight) / 2)
+
+            ZStack {
+                VStack(spacing: 0) {
+                    Rectangle()
+                        .fill(Color.black.opacity(0.55))
+                        .frame(height: barHeight)
+
+                    Rectangle()
+                        .stroke(Color.white.opacity(0.45), lineWidth: 1)
+                        .frame(height: targetHeight)
+
+                    Rectangle()
+                        .fill(Color.black.opacity(0.55))
+                        .frame(height: barHeight)
+                }
+            }
+        }
+        .ignoresSafeArea()
     }
 }
 

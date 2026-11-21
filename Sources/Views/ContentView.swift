@@ -20,6 +20,16 @@ struct ContentView: View {
             )
             .ignoresSafeArea()
 
+            // Ghost Frame (Match Cut) translucent overlay of last photo or video frame
+            if engine.showGhostOverlay, let ghost = engine.ghostImage {
+                Image(uiImage: ghost)
+                    .resizable()
+                    .scaledToFill()
+                    .opacity(0.28)
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+            }
+
             // Crisp native-style shutter blink
             if engine.shutterFlashVisible {
                 Color.black.opacity(0.65)
@@ -42,6 +52,7 @@ struct ContentView: View {
                 hudStore: engine.hudStore,
                 activeShot: engine.activeShot,
                 overlayMode: engine.overlayMode,
+                aspectMask: engine.aspectMask,
                 isRecording: engine.isRecording
             )
 
@@ -173,6 +184,29 @@ struct ContentView: View {
                                 .background(Capsule().fill(Color.black.opacity(0.5)))
                         }
                         .disabled(engine.isRecording)
+                    }
+
+                    // Aspect Mask (9:16 / 4:5 / 16:9)
+                    Button {
+                        engine.cycleAspectMask()
+                    } label: {
+                        Text(engine.aspectMask.rawValue)
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundColor(engine.aspectMask == .full ? .white : .cyan)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 6)
+                            .background(Capsule().fill(Color.black.opacity(0.5)))
+                    }
+
+                    // Ghost Frame (Match Cut) toggle
+                    Button {
+                        engine.toggleGhostOverlay()
+                    } label: {
+                        Image(systemName: "square.on.square.dashed")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(engine.showGhostOverlay ? .cyan : (engine.ghostImage != nil ? .white : .white.opacity(0.45)))
+                            .frame(width: 30, height: 28)
+                            .background(Circle().fill(Color.black.opacity(0.5)))
                     }
 
                     // Self-timer (Off / 3s / 10s)

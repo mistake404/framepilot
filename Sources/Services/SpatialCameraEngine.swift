@@ -86,6 +86,9 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     @Published var recordingSeconds: Int = 0
     @Published var statusToast: String?
     @Published var overlayMode: OverlayMode = .thirds
+    @Published var aspectMask: AspectMask = .full
+    @Published var ghostImage: UIImage?
+    @Published var showGhostOverlay: Bool = false
     @Published var availableLenses: [Double] = [1.0]
     @Published var activeLens: Double = 1.0
     @Published var exposureBias: Float = 0.0
@@ -581,6 +584,18 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         overlayMode = overlayMode.next
     }
 
+    func cycleAspectMask() {
+        aspectMask = aspectMask.next
+    }
+
+    func toggleGhostOverlay() {
+        guard ghostImage != nil else {
+            showToast("Capta 1 foto ou vídeo primeiro para o Ghost Frame")
+            return
+        }
+        showGhostOverlay.toggle()
+    }
+
     func selectPack(_ pack: ScenePack) {
         selectedPack = pack
         activeShotIndex = 0
@@ -889,6 +904,12 @@ extension SpatialCameraEngine: AVCapturePhotoCaptureDelegate {
             return
         }
 
+        if let preview = Self.downscaledGhostImage(from: data) {
+            DispatchQueue.main.async {
+                self.ghostImage = preview
+            }
+        }
+
         PHPhotoLibrary.requestAuthorization(for: .addOnly) { [weak self] status in
             guard let self else { return }
             guard status == .authorized || status == .limited else {
@@ -927,6 +948,13 @@ extension SpatialCameraEngine: AVCaptureFileOutputRecordingDelegate {
             try? FileManager.default.removeItem(at: outputFileURL)
             showToast("Erro na gravação de vídeo")
             return
+        }
+
+        // Extract last frame of the recorded clip for Match Cut Ghost Overlay
+        if let lastFrame = Self.extractLastVideoFrame(from: outputFileURL) {
+            DispatchQueue.main.async {
+                self.ghostImage = lastFrame
+            }
         }
 
         PHPhotoLibrary.requestAuthorization(for: .addOnly) { [weak self] status in
@@ -1009,6 +1037,30 @@ extension SpatialCameraEngine: AVCaptureDepthDataOutputDelegate {
         guard !samples.isEmpty else { return nil }
         samples.sort()
         return Double(samples[samples.count / 2])
+    }
+
+    private static func downscaledGhostImage(from data: Data) -> UIImage? {
+        guard let image = UIImage(data: data) else { return nil }
+        let maxDim: CGFloat = 900
+        let scale = min(1.0, maxDim / max(image.size.width, image.size.height))
+        let targetSize = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+        let renderer = UIGraphicsImageRenderer(size: targetSize)
+        return renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: targetSize))
+        }
+    }
+
+    private static func extractLastVideoFrame(from url: URL) -> UIImage? {
+        let asset = AVURLAsset(url: url)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: 900, height: 1600)
+        let duration = asset.duration
+        let targetTime = CMTime(seconds: max(0, duration.seconds - 0.08), preferredTimescale: 600)
+        guard let cgImage = try? generator.copyCGImage(at: targetTime, actualTime: nil) else {
+            return nil
+        }
+        return UIImage(cgImage: cgImage)
     }
 }
 

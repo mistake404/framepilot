@@ -1,6 +1,29 @@
 import Foundation
 import CoreGraphics
 
+enum AspectMask: String, CaseIterable {
+    case full = "9:16"
+    case feed4x5 = "4:5"
+    case cinema16x9 = "16:9"
+
+    var next: AspectMask {
+        switch self {
+        case .full: return .feed4x5
+        case .feed4x5: return .cinema16x9
+        case .cinema16x9: return .full
+        }
+    }
+
+    /// Width / Height ratio when held in portrait
+    var portraitRatio: CGFloat? {
+        switch self {
+        case .full: return nil
+        case .feed4x5: return 4.0 / 5.0
+        case .cinema16x9: return 16.0 / 9.0
+        }
+    }
+}
+
 enum OverlayMode: String, CaseIterable {
     case thirds = "Terços"
     case reelsSafeZone = "Reels"
