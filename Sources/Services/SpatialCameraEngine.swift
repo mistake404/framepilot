@@ -6,7 +6,64 @@ import Photos
 import Vision
 import UIKit
 
-/// Isolated high-frequency telemetry store so 30Hz HUD updates never rebuild the main camera view tree.
+enum VideoQuality: String, CaseIterable {
+    case hd1080p60 = "1080p 60"
+    case uhd4K30 = "4K 30"
+
+    var next: VideoQuality {
+        self == .hd1080p60 ? .uhd4K30 : .hd1080p60
+    }
+}
+
+enum FlashOption: String, CaseIterable {
+    case auto = "Auto"
+    case on = "On"
+    case off = "Off"
+
+    var next: FlashOption {
+        switch self {
+        case .auto: return .on
+        case .on: return .off
+        case .off: return .auto
+        }
+    }
+
+    var iconName: String {
+        switch self {
+        case .auto: return "bolt.badge.a.fill"
+        case .on: return "bolt.fill"
+        case .off: return "bolt.slash.fill"
+        }
+    }
+
+    var avFlashMode: AVCaptureDevice.FlashMode {
+        switch self {
+        case .auto: return .auto
+        case .on: return .on
+        case .off: return .off
+        }
+    }
+}
+
+enum TimerOption: Int, CaseIterable {
+    case off = 0
+    case three = 3
+    case ten = 10
+
+    var next: TimerOption {
+        switch self {
+        case .off: return .three
+        case .three: return .ten
+        case .ten: return .off
+        }
+    }
+
+    var label: String {
+        self == .off ? "Off" : "\(rawValue)s"
+    }
+}
+
+/// Isolated high-frequency telemetry store so HUD updates never rebuild the main camera view tree.
 final class HUDTelemetryStore: ObservableObject {
     @Published var telemetry = CameraTelemetry()
 }
@@ -19,6 +76,12 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     @Published var activeShotIndex: Int = 0
     @Published var completedShotIds: Set<String> = []
     @Published var captureMode: CaptureMode = .photo
+    @Published var videoQuality: VideoQuality = .uhd4K30
+    @Published var flashOption: FlashOption = .auto
+    @Published var timerOption: TimerOption = .off
+    @Published var countdownRemaining: Int = 0
+    @Published var shutterFlashVisible: Bool = false
+    @Published var isThermalEcoActive: Bool = false
     @Published var isRecording: Bool = false
     @Published var recordingSeconds: Int = 0
     @Published var statusToast: String?
@@ -41,8 +104,12 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     }()
     private let sensorLock = NSLock()
 
+    // Reusable Vision request (zero per-frame allocations)
+    private let faceRequest = VNDetectFaceRectanglesRequest()
+
     private var videoDevice: AVCaptureDevice?
     private var wideZoomFactor: Double = 1.0
+    private var pinchStartLens: Double = 1.0
     private let photoOutput = AVCapturePhotoOutput()
     private let movieOutput = AVCaptureMovieFileOutput()
     private let videoDataOutput = AVCaptureVideoDataOutput()
@@ -58,6 +125,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     private var hasMotionSample: Bool = false
     private var isRecordingFlag: Bool = false
     private var currentTargetShot: ShotTemplate?
+    private var currentThermalState: ProcessInfo.ThermalState = ProcessInfo.processInfo.thermalState
 
     private var lastVisionTimestamp: TimeInterval = 0
     private var isAnalyzingVision: Bool = false
@@ -68,6 +136,8 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
 
     private var hudTimer: DispatchSourceTimer?
     private var recordingTimer: Timer?
+    private var countdownTimer: Timer?
+    private var thermalObserver: NSObjectProtocol?
 
     private let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
     private let notificationFeedback = UINotificationFeedbackGenerator()
@@ -85,7 +155,67 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         if let first = activeShot {
             captureMode = first.preferredMode
         }
+        observeThermalState()
     }
+
+    deinit {
+        if let thermalObserver {
+            NotificationCenter.default.removeObserver(thermalObserver)
+        }
+    }
+
+    // MARK: - Thermal & Battery Protection
+
+    private func observeThermalState() {
+        updateThermalState()
+        thermalObserver = NotificationCenter.default.addObserver(
+            forName: ProcessInfo.thermalStateDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.updateThermalState()
+        }
+    }
+
+    private func updateThermalState() {
+        let state = ProcessInfo.processInfo.thermalState
+        sensorLock.lock()
+        currentThermalState = state
+        sensorLock.unlock()
+
+        let ecoNeeded = (state == .serious || state == .critical)
+        DispatchQueue.main.async {
+            if ecoNeeded && !self.isThermalEcoActive {
+                self.showToast("Modo frio ativo — a proteger bateria")
+            }
+            self.isThermalEcoActive = ecoNeeded
+        }
+
+        // Automatically cap frame rate to 30fps if device starts getting warm
+        if ecoNeeded {
+            sessionQueue.async { [weak self] in
+                self?.applyThermalSafeFrameRate()
+            }
+        }
+    }
+
+    private func applyThermalSafeFrameRate() {
+        guard let device = videoDevice else { return }
+        let targetFps: Int32 = (captureMode == .video && videoQuality == .hd1080p60 && currentThermalState == .nominal) ? 60 : 30
+        let supported = device.activeFormat.videoSupportedFrameRateRanges.contains {
+            $0.minFrameRate <= Double(targetFps) && $0.maxFrameRate >= Double(targetFps)
+        }
+        guard supported else { return }
+        do {
+            try device.lockForConfiguration()
+            let duration = CMTime(value: 1, timescale: targetFps)
+            device.activeVideoMinFrameDuration = duration
+            device.activeVideoMaxFrameDuration = duration
+            device.unlockForConfiguration()
+        } catch {}
+    }
+
+    // MARK: - Lifecycle (Strict Background Shutdown = 0% Battery Drain)
 
     func start() {
         impactFeedback.prepare()
@@ -111,6 +241,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     }
 
     func stop() {
+        cancelCountdown()
         hudTimer?.cancel()
         hudTimer = nil
         motionManager.stopDeviceMotionUpdates()
@@ -126,7 +257,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - Session Configuration (Native Apple Quality + Live LiDAR Depth)
+    // MARK: - Session Configuration (Max Quality + Thermal Efficiency + Live LiDAR)
 
     private func configureSession() {
         captureSession.beginConfiguration()
@@ -134,7 +265,6 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
 
         captureSession.sessionPreset = .high
 
-        // Prefer Triple Camera (0.5x / 1x / 2x / 5x) -> LiDAR Depth Camera -> Dual Wide -> Wide
         let deviceTypes: [AVCaptureDevice.DeviceType] = [
             .builtInTripleCamera,
             .builtInLiDARDepthCamera,
@@ -156,20 +286,25 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         captureSession.addInput(videoInput)
         videoDevice = device
 
-        // Audio input for native synced video sound
         if let audioDevice = AVCaptureDevice.default(for: .audio),
            let audioInput = try? AVCaptureDeviceInput(device: audioDevice),
            captureSession.canAddInput(audioInput) {
             captureSession.addInput(audioInput)
         }
 
-        // Photo output (Smart HDR, Photonic Engine, full-resolution HEIC)
+        // Photo Output: Smart HDR + Photonic Engine + Max Resolution + Zero Shutter Lag
         if captureSession.canAddOutput(photoOutput) {
             captureSession.addOutput(photoOutput)
             photoOutput.maxPhotoQualityPrioritization = .quality
+            if photoOutput.isResponsiveCaptureSupported {
+                photoOutput.isResponsiveCaptureEnabled = true
+            }
+            if photoOutput.isFastCapturePrioritizationSupported {
+                photoOutput.isFastCapturePrioritizationEnabled = true
+            }
         }
 
-        // Movie output (native HEVC + Cinematic Extended Stabilization + Audio)
+        // Movie Output: Native HEVC + Cinematic Extended Stabilization
         if captureSession.canAddOutput(movieOutput) {
             captureSession.addOutput(movieOutput)
             if let videoConn = movieOutput.connection(with: .video) {
@@ -196,7 +331,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
             depthDataOutput.isFilteringEnabled = true
             depthDataOutput.setDelegate(self, callbackQueue: depthQueue)
 
-            if let depthFormat = Self.selectBestDepthFormat(for: device) {
+            if let depthFormat = Self.selectBestDepthFormat(for: device, prefer4K: videoQuality == .uhd4K30) {
                 do {
                     try device.lockForConfiguration()
                     if let videoFormat = depthFormat.videoFormat {
@@ -214,6 +349,9 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
             }
         }
 
+        // Unlock highest supported photo resolution (24MP / 48MP on Pro Max)
+        applyMaxPhotoDimensions(for: device)
+
         // Compute lens switch-over multipliers (0.5x, 1x, 2x, 5x)
         if device.deviceType == .builtInTripleCamera || device.deviceType == .builtInDualWideCamera {
             wideZoomFactor = device.virtualDeviceSwitchOverVideoZoomFactors.first?.doubleValue ?? 2.0
@@ -226,7 +364,6 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         let candidateLenses: [Double] = [0.5, 1.0, 2.0, 5.0]
         let supported = candidateLenses.filter { $0 >= minMult - 0.05 && $0 <= maxMult + 0.05 }
 
-        // Start cleanly at 1.0x
         do {
             try device.lockForConfiguration()
             device.videoZoomFactor = CGFloat(max(Double(device.minAvailableVideoZoomFactor), wideZoomFactor))
@@ -236,8 +373,13 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
             if device.isExposureModeSupported(.continuousAutoExposure) {
                 device.exposureMode = .continuousAutoExposure
             }
+            if device.activeFormat.isVideoHDRSupported {
+                device.automaticallyAdjustsVideoHDREnabled = true
+            }
             device.unlockForConfiguration()
         } catch {}
+
+        applyThermalSafeFrameRate()
 
         DispatchQueue.main.async {
             self.availableLenses = supported.isEmpty ? [1.0] : supported
@@ -248,26 +390,40 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         isConfigured = true
     }
 
-    private static func selectBestDepthFormat(
-        for device: AVCaptureDevice
-    ) -> (videoFormat: AVCaptureDevice.Format?, depthFormat: AVCaptureDevice.Format)? {
-        // First check active format so we keep .high / 4K if already depth-capable
-        if let existing = pickDepthFormat(from: device.activeFormat.supportedDepthDataFormats) {
-            return (nil, existing)
+    private func applyMaxPhotoDimensions(for device: AVCaptureDevice) {
+        if let maxDim = device.activeFormat.supportedMaxPhotoDimensions.max(by: {
+            (Int($0.width) * Int($0.height)) < (Int($1.width) * Int($1.height))
+        }) {
+            photoOutput.maxPhotoDimensions = maxDim
         }
+    }
 
-        // Otherwise pick highest-resolution depth-capable video format (preferring 1920x1080+)
+    private static func selectBestDepthFormat(
+        for device: AVCaptureDevice,
+        prefer4K: Bool
+    ) -> (videoFormat: AVCaptureDevice.Format?, depthFormat: AVCaptureDevice.Format)? {
         let depthCapable = device.formats.filter { !$0.supportedDepthDataFormats.isEmpty }
+        let targetWidth: Int32 = prefer4K ? 3840 : 1920
+
         let sorted = depthCapable.sorted { lhs, rhs in
             let lDim = CMVideoFormatDescriptionGetDimensions(lhs.formatDescription)
             let rDim = CMVideoFormatDescriptionGetDimensions(rhs.formatDescription)
-            return (Int(lDim.width) * Int(lDim.height)) > (Int(rDim.width) * Int(rDim.height))
+            let lDiff = abs(lDim.width - targetWidth)
+            let rDiff = abs(rDim.width - targetWidth)
+            if lDiff != rDiff { return lDiff < rDiff }
+            let lMaxFps = lhs.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 30
+            let rMaxFps = rhs.videoSupportedFrameRateRanges.map(\.maxFrameRate).max() ?? 30
+            return lMaxFps > rMaxFps
         }
 
         for fmt in sorted {
             if let depthFmt = pickDepthFormat(from: fmt.supportedDepthDataFormats) {
                 return (fmt, depthFmt)
             }
+        }
+
+        if let existing = pickDepthFormat(from: device.activeFormat.supportedDepthDataFormats) {
+            return (nil, existing)
         }
         return nil
     }
@@ -289,7 +445,49 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         return formats.first
     }
 
-    // MARK: - User Controls (Lenses, Focus, Exposure, Scene Packs)
+    // MARK: - User Controls (Lenses, Pinch, Focus, Exposure, Quality, Flash, Timer)
+
+    func setCaptureMode(_ mode: CaptureMode) {
+        captureMode = mode
+        sessionQueue.async { [weak self] in
+            self?.applyThermalSafeFrameRate()
+        }
+    }
+
+    func toggleVideoQuality() {
+        guard !isRecording else { return }
+        videoQuality = videoQuality.next
+        let prefer4K = (videoQuality == .uhd4K30)
+
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.videoDevice else { return }
+            self.captureSession.beginConfiguration()
+            if let depthFormat = Self.selectBestDepthFormat(for: device, prefer4K: prefer4K) {
+                do {
+                    try device.lockForConfiguration()
+                    if let videoFormat = depthFormat.videoFormat {
+                        device.activeFormat = videoFormat
+                    }
+                    device.activeDepthDataFormat = depthFormat.depthFormat
+                    if device.activeFormat.isVideoHDRSupported {
+                        device.automaticallyAdjustsVideoHDREnabled = true
+                    }
+                    device.unlockForConfiguration()
+                } catch {}
+                self.applyMaxPhotoDimensions(for: device)
+            }
+            self.captureSession.commitConfiguration()
+            self.applyThermalSafeFrameRate()
+        }
+    }
+
+    func cycleFlash() {
+        flashOption = flashOption.next
+    }
+
+    func cycleTimer() {
+        timerOption = timerOption.next
+    }
 
     func setLens(_ multiplier: Double) {
         activeLens = multiplier
@@ -303,6 +501,32 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
             do {
                 try device.lockForConfiguration()
                 device.ramp(toVideoZoomFactor: clamped, withRate: 14.0)
+                device.unlockForConfiguration()
+            } catch {}
+        }
+    }
+
+    func handlePinchZoom(scale: CGFloat, state: UIGestureRecognizer.State) {
+        if state == .began {
+            pinchStartLens = activeLens
+            return
+        }
+        guard state == .changed else { return }
+        let minLens = availableLenses.first ?? 0.5
+        let maxLens = max(availableLenses.last ?? 5.0, 10.0)
+        let target = max(minLens, min(maxLens, pinchStartLens * Double(scale)))
+        activeLens = target
+
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.videoDevice else { return }
+            let rawFactor = target * self.wideZoomFactor
+            let clamped = max(
+                device.minAvailableVideoZoomFactor,
+                min(device.maxAvailableVideoZoomFactor, CGFloat(rawFactor))
+            )
+            do {
+                try device.lockForConfiguration()
+                device.videoZoomFactor = clamped
                 device.unlockForConfiguration()
             } catch {}
         }
@@ -362,7 +586,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         activeShotIndex = 0
         completedShotIds.removeAll()
         if let first = pack.shots.first {
-            captureMode = first.preferredMode
+            setCaptureMode(first.preferredMode)
             if availableLenses.contains(first.recommendedLens) {
                 setLens(first.recommendedLens)
             }
@@ -376,7 +600,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         guard selectedPack.shots.indices.contains(index) else { return }
         activeShotIndex = index
         let shot = selectedPack.shots[index]
-        captureMode = shot.preferredMode
+        setCaptureMode(shot.preferredMode)
         if availableLenses.contains(shot.recommendedLens) {
             setLens(shot.recommendedLens)
         }
@@ -385,11 +609,11 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         wasLocked = false
     }
 
-    // MARK: - CoreMotion (Background 60Hz)
+    // MARK: - CoreMotion (Power-Efficient 30Hz Background Sampling)
 
     private func startMotionUpdates() {
         guard motionManager.isDeviceMotionAvailable else { return }
-        motionManager.deviceMotionUpdateInterval = 1.0 / 60.0
+        motionManager.deviceMotionUpdateInterval = 1.0 / 30.0
         motionManager.startDeviceMotionUpdates(to: motionQueue) { [weak self] motion, _ in
             guard let self, let motion else { return }
             let g = motion.gravity
@@ -403,10 +627,10 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
 
             self.sensorLock.lock()
             if self.hasMotionSample {
-                let alpha = 0.25
+                let alpha = 0.28
                 self.smoothedPitchDegrees += alpha * (pitchDeg - self.smoothedPitchDegrees)
                 self.smoothedRollDegrees += alpha * (horizonErrorDeg - self.smoothedRollDegrees)
-                self.smoothedMotionSpeed += 0.20 * (angularSpeedDeg - self.smoothedMotionSpeed)
+                self.smoothedMotionSpeed += 0.22 * (angularSpeedDeg - self.smoothedMotionSpeed)
             } else {
                 self.smoothedPitchDegrees = pitchDeg
                 self.smoothedRollDegrees = horizonErrorDeg
@@ -417,12 +641,12 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - 30Hz HUD Update Loop
+    // MARK: - Adaptive HUD Update Loop (20Hz nominal, 10Hz thermal eco)
 
     private func startHUDLoop() {
         hudTimer?.cancel()
         let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .userInteractive))
-        timer.schedule(deadline: .now(), repeating: .milliseconds(33))
+        timer.schedule(deadline: .now(), repeating: .milliseconds(50))
         timer.setEventHandler { [weak self] in
             self?.publishHUDTick()
         }
@@ -437,14 +661,16 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         let motionSpeed = smoothedMotionSpeed
         let distance = smoothedDistanceMeters
         let faceRect = latestFaceRect
+        let thermal = currentThermalState
         sensorLock.unlock()
 
         let motionPace = ShotCoachEngine.classifyMotionPace(speedDegPerSec: motionSpeed)
         let iso = Double(videoDevice?.iso ?? 200)
         let lighting: LightingCondition = iso > 900 ? .low : (iso < 60 ? .bright : .balanced)
 
+        let adviceInterval = (thermal == .serious || thermal == .critical) ? 0.30 : 0.15
         let now = CACurrentMediaTime()
-        if now - lastAdviceUpdate >= 0.125 {
+        if now - lastAdviceUpdate >= adviceInterval {
             lastAdviceUpdate = now
             cachedDetectedShot = ShotCoachEngine.detectShotKind(distanceMeters: distance, pitchDegrees: pitch)
             cachedAdvice = ShotCoachEngine.evaluate(
@@ -482,9 +708,73 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - Capture Native Photo (Smart HDR + Photonic Engine)
+    // MARK: - Shutter & Countdown
 
-    func capturePhoto() {
+    func triggerShutter() {
+        if countdownRemaining > 0 {
+            cancelCountdown()
+            return
+        }
+
+        if captureMode == .video && isRecording {
+            stopVideoRecording()
+            return
+        }
+
+        if timerOption != .off {
+            startCountdown(seconds: timerOption.rawValue) { [weak self] in
+                guard let self else { return }
+                if self.captureMode == .photo {
+                    self.capturePhotoNow()
+                } else {
+                    self.startVideoRecording()
+                }
+            }
+        } else {
+            if captureMode == .photo {
+                capturePhotoNow()
+            } else {
+                startVideoRecording()
+            }
+        }
+    }
+
+    private func startCountdown(seconds: Int, completion: @escaping () -> Void) {
+        countdownRemaining = seconds
+        impactFeedback.impactOccurred()
+        countdownTimer?.invalidate()
+        countdownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+            guard let self else {
+                timer.invalidate()
+                return
+            }
+            if self.countdownRemaining > 1 {
+                self.countdownRemaining -= 1
+                self.impactFeedback.impactOccurred()
+            } else {
+                timer.invalidate()
+                self.countdownTimer = nil
+                self.countdownRemaining = 0
+                completion()
+            }
+        }
+    }
+
+    private func cancelCountdown() {
+        countdownTimer?.invalidate()
+        countdownTimer = nil
+        countdownRemaining = 0
+    }
+
+    private func capturePhotoNow() {
+        DispatchQueue.main.async {
+            self.shutterFlashVisible = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                self.shutterFlashVisible = false
+            }
+        }
+
+        let desiredFlash = flashOption.avFlashMode
         sessionQueue.async { [weak self] in
             guard let self else { return }
             let settings: AVCapturePhotoSettings
@@ -494,21 +784,15 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
                 settings = AVCapturePhotoSettings()
             }
             settings.photoQualityPrioritization = .quality
+            settings.maxPhotoDimensions = self.photoOutput.maxPhotoDimensions
+            if self.photoOutput.supportedFlashModes.contains(desiredFlash) {
+                settings.flashMode = desiredFlash
+            }
 
             if let conn = self.photoOutput.connection(with: .video) {
                 conn.videoRotationAngle = self.currentVideoRotationAngle()
             }
             self.photoOutput.capturePhoto(with: settings, delegate: self)
-        }
-    }
-
-    // MARK: - Capture Native Movie (4K/1080p HEVC + Cinematic Stabilization + Audio)
-
-    func toggleVideoRecording() {
-        if isRecording {
-            stopVideoRecording()
-        } else {
-            startVideoRecording()
         }
     }
 
@@ -556,7 +840,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         if activeShotIndex + 1 < selectedPack.shots.count {
             activeShotIndex += 1
             let nextShot = selectedPack.shots[activeShotIndex]
-            captureMode = nextShot.preferredMode
+            setCaptureMode(nextShot.preferredMode)
             if availableLenses.contains(nextShot.recommendedLens) {
                 setLens(nextShot.recommendedLens)
             }
@@ -620,7 +904,7 @@ extension SpatialCameraEngine: AVCapturePhotoCaptureDelegate {
                     if success {
                         self.notificationFeedback.notificationOccurred(.success)
                         self.markActiveShotCaptured()
-                        self.showToast("Foto Pro guardada na galeria")
+                        self.showToast("Foto HD Pro guardada")
                     } else {
                         self.showToast("Erro ao guardar foto")
                     }
@@ -661,7 +945,7 @@ extension SpatialCameraEngine: AVCaptureFileOutputRecordingDelegate {
                     if success {
                         self.notificationFeedback.notificationOccurred(.success)
                         self.markActiveShotCaptured()
-                        self.showToast("Vídeo Pro guardado na galeria")
+                        self.showToast("Vídeo Pro guardado")
                     } else {
                         self.showToast("Erro ao guardar vídeo")
                     }
@@ -728,7 +1012,7 @@ extension SpatialCameraEngine: AVCaptureDepthDataOutputDelegate {
     }
 }
 
-// MARK: - AVCaptureVideoDataOutputSampleBufferDelegate (5Hz Apple Vision Face Tracking)
+// MARK: - AVCaptureVideoDataOutputSampleBufferDelegate (Thermal-Aware Zero-Alloc Vision)
 
 extension SpatialCameraEngine: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(
@@ -736,15 +1020,36 @@ extension SpatialCameraEngine: AVCaptureVideoDataOutputSampleBufferDelegate {
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
+        sensorLock.lock()
+        let thermal = currentThermalState
+        sensorLock.unlock()
+
+        // Pause Vision completely if device gets seriously warm to protect battery
+        if thermal == .serious || thermal == .critical {
+            sensorLock.lock()
+            latestFaceRect = nil
+            sensorLock.unlock()
+            return
+        }
+
+        // Throttle Vision: 4Hz normal, 2Hz while recording, 1.5Hz if warm (.fair)
+        let minInterval: TimeInterval
+        if thermal == .fair {
+            minInterval = 0.65
+        } else if isRecordingFlag {
+            minInterval = 0.50
+        } else {
+            minInterval = 0.25
+        }
+
         let now = CACurrentMediaTime()
-        guard now - lastVisionTimestamp >= 0.20, !isAnalyzingVision else { return }
+        guard now - lastVisionTimestamp >= minInterval, !isAnalyzingVision else { return }
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
         lastVisionTimestamp = now
         isAnalyzingVision = true
         defer { isAnalyzingVision = false }
 
-        let request = VNDetectFaceRectanglesRequest()
         let handler = VNImageRequestHandler(
             cvPixelBuffer: pixelBuffer,
             orientation: currentVisionOrientation(),
@@ -752,8 +1057,8 @@ extension SpatialCameraEngine: AVCaptureVideoDataOutputSampleBufferDelegate {
         )
 
         do {
-            try handler.perform([request])
-            if let face = (request.results ?? []).max(by: {
+            try handler.perform([faceRequest])
+            if let face = (faceRequest.results ?? []).max(by: {
                 ($0.boundingBox.width * $0.boundingBox.height) < ($1.boundingBox.width * $1.boundingBox.height)
             }) {
                 let b = face.boundingBox

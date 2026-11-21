@@ -1,17 +1,31 @@
 import SwiftUI
 
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var engine = SpatialCameraEngine()
     @State private var showPackSheet = false
     @State private var showExposureSlider = false
 
     var body: some View {
         ZStack {
-            // Native Apple Pro Camera preview with tap-to-focus
-            ProCameraPreviewView(session: engine.captureSession) { devicePoint, screenPoint in
-                engine.focus(at: devicePoint, screenPoint: screenPoint)
-            }
+            // Native Apple Pro Camera preview with tap-to-focus & pinch-to-zoom
+            ProCameraPreviewView(
+                session: engine.captureSession,
+                onFocusTap: { devicePoint, screenPoint in
+                    engine.focus(at: devicePoint, screenPoint: screenPoint)
+                },
+                onPinchZoom: { scale, state in
+                    engine.handlePinchZoom(scale: scale, state: state)
+                }
+            )
             .ignoresSafeArea()
+
+            // Crisp native-style shutter blink
+            if engine.shutterFlashVisible {
+                Color.black.opacity(0.65)
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+            }
 
             // Tap-to-focus yellow reticle
             if let focusPoint = engine.focusIndicatorPoint {
@@ -31,11 +45,21 @@ struct ContentView: View {
                 isRecording: engine.isRecording
             )
 
+            // Big self-timer countdown overlay
+            if engine.countdownRemaining > 0 {
+                Text("\(engine.countdownRemaining)")
+                    .font(.system(size: 86, weight: .bold, design: .rounded))
+                    .foregroundColor(.white)
+                    .shadow(color: .black.opacity(0.6), radius: 12)
+                    .allowsHitTesting(false)
+            }
+
             // Controls overlay (Top telemetry + Bottom capture dock)
             VStack(spacing: 0) {
                 TopTelemetryBar(
                     hudStore: engine.hudStore,
                     overlayMode: engine.overlayMode,
+                    isThermalEcoActive: engine.isThermalEcoActive,
                     onCycleOverlay: { engine.cycleOverlayMode() }
                 )
                 .padding(.horizontal, 14)
@@ -83,12 +107,12 @@ struct ContentView: View {
                     .padding(.bottom, 8)
                 }
 
-                // Lens selector (0.5x / 1x / 2x / 5x) + EV toggle
-                HStack(spacing: 10) {
+                // Pro Controls strip: Lenses + EV + Flash/Quality + Timer
+                HStack(spacing: 7) {
                     if engine.availableLenses.count > 1 {
-                        HStack(spacing: 4) {
+                        HStack(spacing: 3) {
                             ForEach(engine.availableLenses, id: \.self) { lens in
-                                let isSelected = abs(engine.activeLens - lens) < 0.1
+                                let isSelected = abs(engine.activeLens - lens) < 0.15
                                 let label = lens == 0.5 ? ".5" : "\(Int(lens))"
                                 Button {
                                     engine.setLens(lens)
@@ -96,18 +120,19 @@ struct ContentView: View {
                                     Text(isSelected ? "\(label)x" : label)
                                         .font(.system(size: 11, weight: .bold, design: .monospaced))
                                         .foregroundColor(isSelected ? .yellow : .white)
-                                        .frame(width: 34, height: 28)
+                                        .frame(width: 32, height: 26)
                                         .background(
                                             Circle().fill(isSelected ? Color.black.opacity(0.75) : Color.clear)
                                         )
                                 }
                             }
                         }
-                        .padding(.horizontal, 6)
+                        .padding(.horizontal, 5)
                         .padding(.vertical, 3)
-                        .background(Capsule().fill(Color.black.opacity(0.45)))
+                        .background(Capsule().fill(Color.black.opacity(0.48)))
                     }
 
+                    // EV button
                     Button {
                         withAnimation(.easeInOut(duration: 0.18)) {
                             showExposureSlider.toggle()
@@ -115,15 +140,59 @@ struct ContentView: View {
                     } label: {
                         HStack(spacing: 3) {
                             Image(systemName: "plusminus.circle")
-                                .font(.system(size: 12, weight: .semibold))
+                                .font(.system(size: 11, weight: .semibold))
                             Text(engine.exposureBias == 0 ? "EV" : String(format: "%+.1f", engine.exposureBias))
                                 .font(.system(size: 10, weight: .bold, design: .monospaced))
                         }
                         .foregroundColor(showExposureSlider || engine.exposureBias != 0 ? .yellow : .white)
-                        .padding(.horizontal, 9)
+                        .padding(.horizontal, 8)
                         .padding(.vertical, 6)
-                        .background(Capsule().fill(Color.black.opacity(0.48)))
+                        .background(Capsule().fill(Color.black.opacity(0.5)))
                     }
+
+                    // Flash (Photo) or Quality 4K30/1080p60 (Video)
+                    if engine.captureMode == .photo {
+                        Button {
+                            engine.cycleFlash()
+                        } label: {
+                            Image(systemName: engine.flashOption.iconName)
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(engine.flashOption == .on ? .yellow : .white)
+                                .frame(width: 30, height: 28)
+                                .background(Circle().fill(Color.black.opacity(0.5)))
+                        }
+                    } else {
+                        Button {
+                            engine.toggleVideoQuality()
+                        } label: {
+                            Text(engine.videoQuality.rawValue)
+                                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                .foregroundColor(engine.videoQuality == .uhd4K30 ? .yellow : .cyan)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 6)
+                                .background(Capsule().fill(Color.black.opacity(0.5)))
+                        }
+                        .disabled(engine.isRecording)
+                    }
+
+                    // Self-timer (Off / 3s / 10s)
+                    Button {
+                        engine.cycleTimer()
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "timer")
+                                .font(.system(size: 11, weight: .semibold))
+                            if engine.timerOption != .off {
+                                Text(engine.timerOption.label)
+                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            }
+                        }
+                        .foregroundColor(engine.timerOption == .off ? .white : .yellow)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(Color.black.opacity(0.5)))
+                    }
+                    .disabled(engine.isRecording)
                 }
                 .padding(.bottom, 10)
 
@@ -145,6 +214,14 @@ struct ContentView: View {
         }
         .onDisappear {
             engine.stop()
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            if newPhase == .active {
+                engine.start()
+            } else {
+                // Immediately release camera, LiDAR & motion sensors in background (0% battery drain)
+                engine.stop()
+            }
         }
         .sheet(isPresented: $showPackSheet) {
             ScenePackSheet(
@@ -177,7 +254,7 @@ struct ContentView: View {
                 HStack(spacing: 20) {
                     ForEach(CaptureMode.allCases) { mode in
                         Button {
-                            engine.captureMode = mode
+                            engine.setCaptureMode(mode)
                         } label: {
                             Text(mode.rawValue.uppercased())
                                 .font(.system(size: 12, weight: .bold))
@@ -208,13 +285,10 @@ struct ContentView: View {
                 CaptureShutterButton(
                     hudStore: engine.hudStore,
                     captureMode: engine.captureMode,
-                    isRecording: engine.isRecording
+                    isRecording: engine.isRecording,
+                    isCountingDown: engine.countdownRemaining > 0
                 ) {
-                    if engine.captureMode == .photo {
-                        engine.capturePhoto()
-                    } else {
-                        engine.toggleVideoRecording()
-                    }
+                    engine.triggerShutter()
                 }
 
                 Spacer()
@@ -247,6 +321,7 @@ struct ContentView: View {
 private struct TopTelemetryBar: View {
     @ObservedObject var hudStore: HUDTelemetryStore
     let overlayMode: OverlayMode
+    let isThermalEcoActive: Bool
     let onCycleOverlay: () -> Void
 
     var body: some View {
@@ -270,6 +345,14 @@ private struct TopTelemetryBar: View {
                 text: telemetry.detectedShotKind.rawValue,
                 accent: .white
             )
+
+            if isThermalEcoActive {
+                Image(systemName: "snowflake")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(.cyan)
+                    .padding(6)
+                    .background(Circle().fill(Color.black.opacity(0.58)))
+            }
 
             Spacer()
 
@@ -308,6 +391,7 @@ private struct CaptureShutterButton: View {
     @ObservedObject var hudStore: HUDTelemetryStore
     let captureMode: CaptureMode
     let isRecording: Bool
+    let isCountingDown: Bool
     let action: () -> Void
 
     var body: some View {
@@ -317,7 +401,13 @@ private struct CaptureShutterButton: View {
                     .stroke(hudStore.telemetry.advice.isLocked ? Color.green : Color.white, lineWidth: 4)
                     .frame(width: 74, height: 74)
 
-                if captureMode == .video {
+                if isCountingDown {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundColor(.white)
+                        .frame(width: 58, height: 58)
+                        .background(Circle().fill(Color.orange))
+                } else if captureMode == .video {
                     RoundedRectangle(cornerRadius: isRecording ? 8 : 30, style: .continuous)
                         .fill(Color.red)
                         .frame(
