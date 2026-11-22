@@ -282,11 +282,15 @@ private struct CoachingBanner: View {
                 .lineLimit(2)
 
             if let shot = activeShot {
-                HStack(spacing: 10) {
+                HStack(spacing: 9) {
                     Label(shot.lensLabel, systemImage: "camera.aperture")
                     Label(shot.distanceLabel, systemImage: "ruler")
                     Label(shot.pitchLabel, systemImage: "angle")
-                    Label(shot.preferredMode.rawValue, systemImage: shot.preferredMode == .video ? "video.fill" : "camera.fill")
+                    if shot.preferredMode == .video {
+                        Label(shot.durationLabel, systemImage: "stopwatch")
+                    } else {
+                        Label(shot.preferredMode.rawValue, systemImage: "camera.fill")
+                    }
                 }
                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
                 .foregroundColor(.white.opacity(0.75))

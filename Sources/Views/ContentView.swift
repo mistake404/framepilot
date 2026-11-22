@@ -4,6 +4,7 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var engine = SpatialCameraEngine()
     @State private var showPackSheet = false
+    @State private var showStoryboardSheet = false
     @State private var showExposureSlider = false
 
     var body: some View {
@@ -259,11 +260,18 @@ struct ContentView: View {
         }
         .sheet(isPresented: $showPackSheet) {
             ScenePackSheet(
-                packs: ScenePack.presets,
+                customPacks: engine.customPacks,
+                presetPacks: ScenePack.presets,
                 selectedPack: engine.selectedPack,
-                onSelect: { engine.selectPack($0) }
+                onSelect: { engine.selectPack($0) },
+                onCreateCustom: { engine.addCustomPack($0) },
+                onDeleteCustom: { engine.deleteCustomPack(id: $0) }
             )
             .presentationDetents([.medium, .large])
+        }
+        .sheet(isPresented: $showStoryboardSheet) {
+            StoryboardSheet(engine: engine)
+                .presentationDetents([.medium, .large])
         }
     }
 
@@ -277,15 +285,21 @@ struct ContentView: View {
                     Image(systemName: "mic.fill")
                         .font(.system(size: 10, weight: .bold))
                         .foregroundColor(.white.opacity(0.9))
-                    Text(formatDuration(engine.recordingSeconds))
-                        .font(.system(size: 13, weight: .bold, design: .monospaced))
-                        .foregroundColor(.white)
+                    if let target = engine.activeShot?.durationLabel {
+                        Text(String(format: "%.1fs / %@", engine.recordingElapsed, target))
+                            .font(.system(size: 13, weight: .bold, design: .monospaced))
+                            .foregroundColor(.white)
+                    } else {
+                        Text(formatDuration(engine.recordingSeconds))
+                            .font(.system(size: 13, weight: .bold, design: .monospaced))
+                            .foregroundColor(.white)
+                    }
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 5)
                 .background(Capsule().fill(Color.red.opacity(0.35)))
             } else {
-                HStack(spacing: 20) {
+                HStack(spacing: 16) {
                     ForEach(CaptureMode.allCases) { mode in
                         Button {
                             engine.setCaptureMode(mode)
@@ -294,6 +308,23 @@ struct ContentView: View {
                                 .font(.system(size: 12, weight: .bold))
                                 .tracking(1)
                                 .foregroundColor(engine.captureMode == mode ? .yellow : .white.opacity(0.65))
+                        }
+                    }
+
+                    if engine.captureMode == .video, let shot = engine.activeShot {
+                        Button {
+                            engine.toggleAutoStop()
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "stopwatch")
+                                    .font(.system(size: 10, weight: .bold))
+                                Text(engine.autoStopEnabled ? "Auto \(shot.durationLabel)" : "Manual")
+                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            }
+                            .foregroundColor(engine.autoStopEnabled ? .cyan : .white.opacity(0.65))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Capsule().fill(Color.white.opacity(0.12)))
                         }
                     }
                 }
@@ -320,18 +351,23 @@ struct ContentView: View {
                     hudStore: engine.hudStore,
                     captureMode: engine.captureMode,
                     isRecording: engine.isRecording,
-                    isCountingDown: engine.countdownRemaining > 0
+                    isCountingDown: engine.countdownRemaining > 0,
+                    targetProgress: engine.targetDurationProgress
                 ) {
                     engine.triggerShutter()
                 }
 
                 Spacer()
 
-                LightingProgressBadge(
-                    hudStore: engine.hudStore,
-                    completedCount: engine.completedShotIds.count,
-                    totalCount: engine.selectedPack.shots.count
-                )
+                Button {
+                    showStoryboardSheet = true
+                } label: {
+                    SessionStoryboardButton(
+                        completedCount: engine.completedShotIds.count,
+                        totalCount: engine.selectedPack.shots.count,
+                        videoCount: engine.recordedVideoCount
+                    )
+                }
             }
             .padding(.horizontal, 24)
         }
@@ -426,6 +462,7 @@ private struct CaptureShutterButton: View {
     let captureMode: CaptureMode
     let isRecording: Bool
     let isCountingDown: Bool
+    let targetProgress: Double
     let action: () -> Void
 
     var body: some View {
@@ -434,6 +471,15 @@ private struct CaptureShutterButton: View {
                 Circle()
                     .stroke(hudStore.telemetry.advice.isLocked ? Color.green : Color.white, lineWidth: 4)
                     .frame(width: 74, height: 74)
+
+                // Target duration progress ring while recording video
+                if isRecording && targetProgress > 0 {
+                    Circle()
+                        .trim(from: 0, to: CGFloat(targetProgress))
+                        .stroke(Color.cyan, style: StrokeStyle(lineWidth: 4.5, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                        .frame(width: 74, height: 74)
+                }
 
                 if isCountingDown {
                     Image(systemName: "xmark")
@@ -459,23 +505,21 @@ private struct CaptureShutterButton: View {
     }
 }
 
-private struct LightingProgressBadge: View {
-    @ObservedObject var hudStore: HUDTelemetryStore
+private struct SessionStoryboardButton: View {
     let completedCount: Int
     let totalCount: Int
+    let videoCount: Int
 
     var body: some View {
-        let lighting = hudStore.telemetry.lighting
-
         VStack(spacing: 3) {
-            Image(systemName: lighting.iconName)
+            Image(systemName: videoCount > 0 ? "film.stack.fill" : "film.stack")
                 .font(.system(size: 16, weight: .semibold))
-                .foregroundColor(lighting == .low ? .orange : .yellow)
+                .foregroundColor(videoCount > 0 ? .yellow : .white)
 
             if totalCount == 0 {
-                Text("Livre")
+                Text("Sessão")
                     .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(.white.opacity(0.8))
+                    .foregroundColor(.white.opacity(0.85))
             } else {
                 Text("\(completedCount)/\(totalCount)")
                     .font(.system(size: 11, weight: .bold, design: .monospaced))
@@ -483,6 +527,13 @@ private struct LightingProgressBadge: View {
             }
         }
         .frame(width: 62, height: 50)
-        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.white.opacity(0.14)))
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(videoCount > 0 ? Color.yellow.opacity(0.22) : Color.white.opacity(0.14))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(videoCount > 0 ? Color.yellow.opacity(0.6) : Color.clear, lineWidth: 1)
+                )
+        )
     }
 }

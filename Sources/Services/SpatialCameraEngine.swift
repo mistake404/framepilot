@@ -72,18 +72,23 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     let captureSession = AVCaptureSession()
     let hudStore = HUDTelemetryStore()
 
+    @Published var customPacks: [ScenePack] = CustomPackStore.load()
     @Published var selectedPack: ScenePack = ScenePack.presets[0]
     @Published var activeShotIndex: Int = 0
     @Published var completedShotIds: Set<String> = []
+    @Published var sessionTakes: [String: SessionTake] = [:]
     @Published var captureMode: CaptureMode = .photo
     @Published var videoQuality: VideoQuality = .uhd4K30
     @Published var flashOption: FlashOption = .auto
     @Published var timerOption: TimerOption = .off
+    @Published var autoStopEnabled: Bool = true
     @Published var countdownRemaining: Int = 0
     @Published var shutterFlashVisible: Bool = false
     @Published var isThermalEcoActive: Bool = false
     @Published var isRecording: Bool = false
+    @Published var isExportingReel: Bool = false
     @Published var recordingSeconds: Int = 0
+    @Published var recordingElapsed: Double = 0.0
     @Published var statusToast: String?
     @Published var overlayMode: OverlayMode = .thirds
     @Published var aspectMask: AspectMask = .full
@@ -142,14 +147,33 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     private var countdownTimer: Timer?
     private var thermalObserver: NSObjectProtocol?
 
+    private var recordingShotId: String?
+    private var recordingShotTitle: String?
+    private var didHitTargetDurationHaptic: Bool = false
+
     private let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
     private let notificationFeedback = UINotificationFeedbackGenerator()
+
+    var allPacks: [ScenePack] {
+        customPacks + ScenePack.presets
+    }
 
     var activeShot: ShotTemplate? {
         guard !selectedPack.shots.isEmpty, selectedPack.shots.indices.contains(activeShotIndex) else {
             return nil
         }
         return selectedPack.shots[activeShotIndex]
+    }
+
+    var targetDurationProgress: Double {
+        guard isRecording, let target = activeShot?.targetDurationSeconds, target > 0 else {
+            return 0
+        }
+        return min(1.0, recordingElapsed / target)
+    }
+
+    var recordedVideoCount: Int {
+        selectedPack.shots.compactMap { sessionTakes[$0.id] }.filter { $0.isVideo && $0.fileURL != nil }.count
     }
 
     override init() {
@@ -597,9 +621,11 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     }
 
     func selectPack(_ pack: ScenePack) {
+        clearSessionFiles()
         selectedPack = pack
         activeShotIndex = 0
         completedShotIds.removeAll()
+        sessionTakes.removeAll()
         if let first = pack.shots.first {
             setCaptureMode(first.preferredMode)
             if availableLenses.contains(first.recommendedLens) {
@@ -609,6 +635,68 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         currentTargetShot = activeShot
         lastAdviceUpdate = 0
         wasLocked = false
+    }
+
+    func addCustomPack(_ pack: ScenePack) {
+        customPacks.insert(pack, at: 0)
+        CustomPackStore.save(customPacks)
+        selectPack(pack)
+        showToast("Guião \"\(pack.name)\" guardado")
+    }
+
+    func deleteCustomPack(id: String) {
+        customPacks.removeAll { $0.id == id }
+        CustomPackStore.save(customPacks)
+        if selectedPack.id == id {
+            selectPack(ScenePack.presets[0])
+        }
+    }
+
+    func toggleAutoStop() {
+        autoStopEnabled.toggle()
+        showToast(autoStopEnabled ? "Auto-Stop na duração alvo: Ligado" : "Auto-Stop: Manual")
+    }
+
+    func exportSessionReel() {
+        guard !isExportingReel else { return }
+        let orderedURLs = selectedPack.shots
+            .compactMap { sessionTakes[$0.id] }
+            .filter { $0.isVideo }
+            .compactMap { $0.fileURL }
+
+        guard !orderedURLs.isEmpty else {
+            showToast("Grava pelo menos 1 plano em vídeo primeiro")
+            return
+        }
+
+        isExportingReel = true
+        Task {
+            do {
+                try await ReelExporter.exportReel(videoURLs: orderedURLs)
+                await MainActor.run {
+                    self.isExportingReel = false
+                    self.notificationFeedback.notificationOccurred(.success)
+                    self.showToast("Reel montado (\(orderedURLs.count) planos) guardado!")
+                }
+            } catch {
+                await MainActor.run {
+                    self.isExportingReel = false
+                    self.showToast(error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    private func sessionClipURL(for shotId: String) -> URL {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("FramePilotSession", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("\(shotId)-\(UUID().uuidString).mov")
+        return url
+    }
+
+    private func clearSessionFiles() {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("FramePilotSession", isDirectory: true)
+        try? FileManager.default.removeItem(at: dir)
     }
 
     func selectShot(at index: Int) {
@@ -812,8 +900,15 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     }
 
     private func startVideoRecording() {
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("FramePilot-\(UUID().uuidString).mov")
+        let shotId = activeShot?.id ?? "free-\(UUID().uuidString)"
+        let shotTitle = activeShot?.title ?? "Plano Livre"
+        let targetDuration = activeShot?.targetDurationSeconds
+        let shouldAutoStop = autoStopEnabled && targetDuration != nil
+        let clipURL = sessionClipURL(for: shotId)
+
+        recordingShotId = shotId
+        recordingShotTitle = shotTitle
+        didHitTargetDurationHaptic = false
 
         sessionQueue.async { [weak self] in
             guard let self, !self.movieOutput.isRecording else { return }
@@ -821,15 +916,28 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
                 conn.videoRotationAngle = self.currentVideoRotationAngle()
             }
             self.isRecordingFlag = true
-            self.movieOutput.startRecording(to: tempURL, recordingDelegate: self)
+            self.movieOutput.startRecording(to: clipURL, recordingDelegate: self)
 
             DispatchQueue.main.async {
                 self.isRecording = true
                 self.recordingSeconds = 0
+                self.recordingElapsed = 0.0
                 self.impactFeedback.impactOccurred()
                 self.recordingTimer?.invalidate()
-                self.recordingTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-                    self?.recordingSeconds += 1
+                self.recordingTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+                    guard let self else { return }
+                    self.recordingElapsed += 0.1
+                    self.recordingSeconds = Int(self.recordingElapsed)
+
+                    if let target = targetDuration, self.recordingElapsed >= target {
+                        if !self.didHitTargetDurationHaptic {
+                            self.didHitTargetDurationHaptic = true
+                            self.impactFeedback.impactOccurred()
+                        }
+                        if shouldAutoStop {
+                            self.stopVideoRecording()
+                        }
+                    }
                 }
             }
         }
@@ -907,6 +1015,16 @@ extension SpatialCameraEngine: AVCapturePhotoCaptureDelegate {
         if let preview = Self.downscaledGhostImage(from: data) {
             DispatchQueue.main.async {
                 self.ghostImage = preview
+                if let shot = self.activeShot {
+                    self.sessionTakes[shot.id] = SessionTake(
+                        shotId: shot.id,
+                        shotTitle: shot.title,
+                        isVideo: false,
+                        fileURL: nil,
+                        thumbnail: preview,
+                        durationSeconds: 0
+                    )
+                }
             }
         }
 
@@ -950,17 +1068,35 @@ extension SpatialCameraEngine: AVCaptureFileOutputRecordingDelegate {
             return
         }
 
-        // Extract last frame of the recorded clip for Match Cut Ghost Overlay
-        if let lastFrame = Self.extractLastVideoFrame(from: outputFileURL) {
-            DispatchQueue.main.async {
+        // Extract last frame of the recorded clip for Match Cut Ghost Overlay & Storyboard thumbnail
+        let lastFrame = Self.extractLastVideoFrame(from: outputFileURL)
+        let capturedShotId = recordingShotId
+        let capturedShotTitle = recordingShotTitle ?? "Plano"
+        let clipDuration = AVURLAsset(url: outputFileURL).duration.seconds
+
+        DispatchQueue.main.async {
+            if let lastFrame {
                 self.ghostImage = lastFrame
+            }
+            if let capturedShotId {
+                // Clean up previous retake file for the same shot if any
+                if let oldURL = self.sessionTakes[capturedShotId]?.fileURL, oldURL != outputFileURL {
+                    try? FileManager.default.removeItem(at: oldURL)
+                }
+                self.sessionTakes[capturedShotId] = SessionTake(
+                    shotId: capturedShotId,
+                    shotTitle: capturedShotTitle,
+                    isVideo: true,
+                    fileURL: outputFileURL,
+                    thumbnail: lastFrame,
+                    durationSeconds: clipDuration.isFinite ? clipDuration : self.recordingElapsed
+                )
             }
         }
 
         PHPhotoLibrary.requestAuthorization(for: .addOnly) { [weak self] status in
             guard let self else { return }
             guard status == .authorized || status == .limited else {
-                try? FileManager.default.removeItem(at: outputFileURL)
                 self.showToast("Permite acesso à galeria nas Definições")
                 return
             }
@@ -968,7 +1104,6 @@ extension SpatialCameraEngine: AVCaptureFileOutputRecordingDelegate {
             PHPhotoLibrary.shared().performChanges({
                 PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: outputFileURL)
             }) { success, _ in
-                try? FileManager.default.removeItem(at: outputFileURL)
                 DispatchQueue.main.async {
                     if success {
                         self.notificationFeedback.notificationOccurred(.success)
