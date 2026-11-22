@@ -138,6 +138,16 @@ struct StoryboardSheet: View {
                         }
                         .tint(.cyan)
 
+                        Toggle(isOn: $engine.includeDynamicCaptions) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "captions.bubble.fill")
+                                    .foregroundColor(.yellow)
+                                Text("Legendas Dinâmicas Virais (Hormozi / Viral)")
+                                    .font(.caption.bold())
+                            }
+                        }
+                        .tint(.yellow)
+
                         Button {
                             engine.exportSessionReel(look: selectedLook)
                         } label: {

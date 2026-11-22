@@ -579,6 +579,345 @@ struct ScenePack: Identifiable, Hashable, Codable {
             ]
         ),
         ScenePack(
+            id: "tech-unboxing",
+            name: "Tech & Unboxing",
+            subtitle: "5 planos dinâmicos para gadgets, tech e reviews",
+            iconName: "laptopcomputer.and.iphone",
+            shots: [
+                ShotTemplate(
+                    id: "tech-1",
+                    title: "Caixa & Hook",
+                    kind: .medium,
+                    preferredMode: .video,
+                    recommendedLens: 1.0,
+                    targetDurationSeconds: 2.5,
+                    targetDistanceRange: 0.8...1.6,
+                    targetPitchRange: -15...5,
+                    maxRollDegrees: 2.5,
+                    movementHint: "Push-in firme",
+                    directorTip: "Apresenta a embalagem antes de abrir para criar antecipação."
+                ),
+                ShotTemplate(
+                    id: "tech-2",
+                    title: "Corte de Selo",
+                    kind: .detail,
+                    preferredMode: .video,
+                    recommendedLens: 2.0,
+                    targetDurationSeconds: 2.0,
+                    targetDistanceRange: 0.25...0.55,
+                    targetPitchRange: -28...(-5),
+                    maxRollDegrees: 3.5,
+                    movementHint: "Deslize lateral macro",
+                    directorTip: "2x para focar o rasgar do selo plástico ou abertura da tampa."
+                ),
+                ShotTemplate(
+                    id: "tech-3",
+                    title: "Reveal do Produto",
+                    kind: .lowAngle,
+                    preferredMode: .video,
+                    recommendedLens: 1.0,
+                    targetDurationSeconds: 2.5,
+                    targetDistanceRange: 0.5...1.2,
+                    targetPitchRange: 12...28,
+                    maxRollDegrees: 2.5,
+                    movementHint: "Tilt-up herói",
+                    directorTip: "Tira o produto da caixa em contrapicado para parecer premium."
+                ),
+                ShotTemplate(
+                    id: "tech-4",
+                    title: "Ecrã / Acabamento",
+                    kind: .closeUp,
+                    preferredMode: .video,
+                    recommendedLens: 2.0,
+                    targetDurationSeconds: 2.0,
+                    targetDistanceRange: 0.35...0.8,
+                    targetPitchRange: -20...10,
+                    maxRollDegrees: 3.0,
+                    movementHint: "Aproximação suave",
+                    directorTip: "Mostra o ecrã a ligar, o vidro ou as portas de ligação."
+                ),
+                ShotTemplate(
+                    id: "tech-5",
+                    title: "Órbita em Mão",
+                    kind: .orbit,
+                    preferredMode: .video,
+                    recommendedLens: 1.0,
+                    targetDurationSeconds: 3.0,
+                    targetDistanceRange: 0.6...1.4,
+                    targetPitchRange: -10...12,
+                    maxRollDegrees: 3.0,
+                    movementHint: "Arco 45°",
+                    directorTip: "Segura o gadget na mão e faz uma rotação para mostrar ergonomia."
+                )
+            ]
+        ),
+        ScenePack(
+            id: "ootd-fashion",
+            name: "Moda & Outfit / OOTD",
+            subtitle: "4 planos de estilo com corte para Reels de moda",
+            iconName: "tshirt.fill",
+            shots: [
+                ShotTemplate(
+                    id: "ootd-1",
+                    title: "Caminhada Total",
+                    kind: .establishing,
+                    preferredMode: .video,
+                    recommendedLens: 1.0,
+                    targetDurationSeconds: 3.0,
+                    targetDistanceRange: 2.2...4.5,
+                    targetPitchRange: -4...6,
+                    maxRollDegrees: 2.0,
+                    movementHint: "Avanço frontal",
+                    directorTip: "Caminha em direção à câmara mostrando o look completo da cabeça aos pés."
+                ),
+                ShotTemplate(
+                    id: "ootd-2",
+                    title: "Ténis & Calçado",
+                    kind: .lowAngle,
+                    preferredMode: .video,
+                    recommendedLens: 0.5,
+                    targetDurationSeconds: 2.0,
+                    targetDistanceRange: 0.6...1.4,
+                    targetPitchRange: 18...38,
+                    maxRollDegrees: 3.0,
+                    movementHint: "Câmara junto ao chão",
+                    directorTip: "0.5x colado ao chão dá escala às sapatilhas e corte da calça."
+                ),
+                ShotTemplate(
+                    id: "ootd-3",
+                    title: "Acessórios & Textura",
+                    kind: .detail,
+                    preferredMode: .video,
+                    recommendedLens: 2.0,
+                    targetDurationSeconds: 2.0,
+                    targetDistanceRange: 0.3...0.75,
+                    targetPitchRange: -15...12,
+                    maxRollDegrees: 3.5,
+                    movementHint: "Travelling lateral",
+                    directorTip: "Foca relógio, joias, botões, cinto ou textura do tecido."
+                ),
+                ShotTemplate(
+                    id: "ootd-4",
+                    title: "Pose Confiante",
+                    kind: .medium,
+                    preferredMode: .video,
+                    recommendedLens: 2.0,
+                    targetDurationSeconds: 2.5,
+                    targetDistanceRange: 1.3...2.5,
+                    targetPitchRange: -6...8,
+                    maxRollDegrees: 2.5,
+                    movementHint: "Micro-push in",
+                    directorTip: "Enquadramento dos joelhos para cima com olhar firme na câmara."
+                )
+            ]
+        ),
+        ScenePack(
+            id: "barber-hair",
+            name: "Barbearia & Cabelo",
+            subtitle: "4 planos para transformação, corte e styling",
+            iconName: "comb.fill",
+            shots: [
+                ShotTemplate(
+                    id: "barber-1",
+                    title: "Antes no Espelho",
+                    kind: .medium,
+                    preferredMode: .video,
+                    recommendedLens: 1.0,
+                    targetDurationSeconds: 2.5,
+                    targetDistanceRange: 1.2...2.4,
+                    targetPitchRange: -6...6,
+                    maxRollDegrees: 2.0,
+                    movementHint: "Estático",
+                    directorTip: "Capta o estado inicial do cabelo e barba antes da tesoura."
+                ),
+                ShotTemplate(
+                    id: "barber-2",
+                    title: "Ação de Tesoura",
+                    kind: .detail,
+                    preferredMode: .video,
+                    recommendedLens: 2.0,
+                    targetDurationSeconds: 2.5,
+                    targetDistanceRange: 0.35...0.85,
+                    targetPitchRange: -15...10,
+                    maxRollDegrees: 3.5,
+                    movementHint: "Acompanha o corte",
+                    directorTip: "2x para focar o cabelo a cair e o movimento das mãos."
+                ),
+                ShotTemplate(
+                    id: "barber-3",
+                    title: "Fade / Degradé",
+                    kind: .closeUp,
+                    preferredMode: .video,
+                    recommendedLens: 2.0,
+                    targetDurationSeconds: 2.0,
+                    targetDistanceRange: 0.45...1.0,
+                    targetPitchRange: -10...12,
+                    maxRollDegrees: 2.5,
+                    movementHint: "Deslize lateral na nuca",
+                    directorTip: "Desliza em torno da têmpora/nuca para exibir a precisão do degradé."
+                ),
+                ShotTemplate(
+                    id: "barber-4",
+                    title: "Reveal do Final",
+                    kind: .orbit,
+                    preferredMode: .video,
+                    recommendedLens: 1.0,
+                    targetDurationSeconds: 3.0,
+                    targetDistanceRange: 0.9...1.8,
+                    targetPitchRange: -5...12,
+                    maxRollDegrees: 2.5,
+                    movementHint: "Órbita 45°",
+                    directorTip: "O cliente sacode a toalha e olha sorridente para o espelho."
+                )
+            ]
+        ),
+        ScenePack(
+            id: "day-in-life",
+            name: "Rotina / Day in the Life",
+            subtitle: "5 planos com ritmo narrativo para vlogs de rotina",
+            iconName: "sun.haze.fill",
+            shots: [
+                ShotTemplate(
+                    id: "day-1",
+                    title: "Despertar / Manhã",
+                    kind: .medium,
+                    preferredMode: .video,
+                    recommendedLens: 1.0,
+                    targetDurationSeconds: 2.5,
+                    targetDistanceRange: 1.5...3.0,
+                    targetPitchRange: -8...8,
+                    maxRollDegrees: 2.0,
+                    movementHint: "Push-in lento",
+                    directorTip: "Câmara pousada a apanhar o primeiro momento do dia."
+                ),
+                ShotTemplate(
+                    id: "day-2",
+                    title: "Café / Pequeno-Almoço",
+                    kind: .detail,
+                    preferredMode: .video,
+                    recommendedLens: 2.0,
+                    targetDurationSeconds: 2.0,
+                    targetDistanceRange: 0.3...0.7,
+                    targetPitchRange: -25...(-5),
+                    maxRollDegrees: 3.0,
+                    movementHint: "Estático",
+                    directorTip: "Café a pingar, chávena a encher ou vapor a subir."
+                ),
+                ShotTemplate(
+                    id: "day-3",
+                    title: "Saída de Casa",
+                    kind: .reveal,
+                    preferredMode: .video,
+                    recommendedLens: 0.5,
+                    targetDurationSeconds: 2.5,
+                    targetDistanceRange: 1.4...3.2,
+                    targetPitchRange: -6...6,
+                    maxRollDegrees: 2.5,
+                    movementHint: "Travelling da porta para a rua",
+                    directorTip: "0.5x cria grande sensação de movimento ao passar a porta."
+                ),
+                ShotTemplate(
+                    id: "day-4",
+                    title: "Trabalho / Foco",
+                    kind: .medium,
+                    preferredMode: .video,
+                    recommendedLens: 1.0,
+                    targetDurationSeconds: 2.5,
+                    targetDistanceRange: 1.0...2.2,
+                    targetPitchRange: -12...5,
+                    maxRollDegrees: 2.5,
+                    movementHint: "Avanço para a secretária",
+                    directorTip: "Teclado, ecrã ou caderno com as mãos em movimento produtivo."
+                ),
+                ShotTemplate(
+                    id: "day-5",
+                    title: "Fim do Dia",
+                    kind: .establishing,
+                    preferredMode: .video,
+                    recommendedLens: 0.5,
+                    targetDurationSeconds: 3.0,
+                    targetDistanceRange: 2.0...5.0,
+                    targetPitchRange: -6...10,
+                    maxRollDegrees: 2.0,
+                    movementHint: "Panorâmica relaxada",
+                    directorTip: "Pôr do sol, fechar do portátil ou relaxar no sofá."
+                )
+            ]
+        ),
+        ScenePack(
+            id: "luxury-tour",
+            name: "Mansão & Luxury Tour",
+            subtitle: "5 planos cinematográficos para propriedades de luxo",
+            iconName: "building.2.crop.circle.fill",
+            shots: [
+                ShotTemplate(
+                    id: "lux-1",
+                    title: "Fachada Imponente",
+                    kind: .lowAngle,
+                    preferredMode: .video,
+                    recommendedLens: 0.5,
+                    targetDurationSeconds: 3.5,
+                    targetDistanceRange: 3.0...8.0,
+                    targetPitchRange: 10...26,
+                    maxRollDegrees: 1.5,
+                    movementHint: "Travelling lento",
+                    directorTip: "0.5x com horizonte rigoroso a 0° para a propriedade parecer grandiosa."
+                ),
+                ShotTemplate(
+                    id: "lux-2",
+                    title: "Entrada Principal",
+                    kind: .reveal,
+                    preferredMode: .video,
+                    recommendedLens: 0.5,
+                    targetDurationSeconds: 3.0,
+                    targetDistanceRange: 1.8...4.5,
+                    targetPitchRange: -4...4,
+                    maxRollDegrees: 1.5,
+                    movementHint: "Deslize da porta para o hall",
+                    directorTip: "Transição de luz exterior para os acabamentos do hall."
+                ),
+                ShotTemplate(
+                    id: "lux-3",
+                    title: "Sala Pé-Direito Duplo",
+                    kind: .establishing,
+                    preferredMode: .video,
+                    recommendedLens: 0.5,
+                    targetDurationSeconds: 3.0,
+                    targetDistanceRange: 2.5...6.0,
+                    targetPitchRange: -2...12,
+                    maxRollDegrees: 1.5,
+                    movementHint: "Push-in contínuo",
+                    directorTip: "Avança lentamente mostrando o teto alto e a luminosidade."
+                ),
+                ShotTemplate(
+                    id: "lux-4",
+                    title: "Cozinha / Mármore",
+                    kind: .detail,
+                    preferredMode: .video,
+                    recommendedLens: 2.0,
+                    targetDurationSeconds: 2.0,
+                    targetDistanceRange: 0.4...1.2,
+                    targetPitchRange: -15...8,
+                    maxRollDegrees: 2.5,
+                    movementHint: "Deslize pela bancada",
+                    directorTip: "2x destaca veios de pedra, torneiras douradas ou ilha central."
+                ),
+                ShotTemplate(
+                    id: "lux-5",
+                    title: "Piscina / Vista Exterior",
+                    kind: .orbit,
+                    preferredMode: .video,
+                    recommendedLens: 0.5,
+                    targetDurationSeconds: 3.5,
+                    targetDistanceRange: 2.5...6.5,
+                    targetPitchRange: -8...10,
+                    maxRollDegrees: 2.0,
+                    movementHint: "Arco suave junto à água",
+                    directorTip: "Termina com o reflexo do céu na piscina e o exterior da casa."
+                )
+            ]
+        ),
+        ScenePack(
             id: "free-mode",
             name: "Modo Livre",
             subtitle: "Qualidade Pro + LiDAR + deteção automática de plano",

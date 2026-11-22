@@ -105,6 +105,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     @Published var isRackFocusing: Bool = false
     @Published var isVirtualDollyActive: Bool = false
     @Published var includeSoundDesign: Bool = true
+    @Published var includeDynamicCaptions: Bool = false
 
     private var rackFocusTimer: DispatchSourceTimer?
     private var currentRackFocusProgress: Double?
@@ -830,14 +831,16 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
                 try await ReelExporter.exportReel(
                     videoURLs: orderedURLs,
                     look: look,
-                    includeSoundDesign: self.includeSoundDesign
+                    includeSoundDesign: self.includeSoundDesign,
+                    includeViralCaptions: self.includeDynamicCaptions
                 )
                 await MainActor.run {
                     self.isExportingReel = false
                     self.notificationFeedback.notificationOccurred(.success)
                     let lookNote = look == .original ? "" : " • \(look.rawValue)"
                     let sfxNote = self.includeSoundDesign && orderedURLs.count > 1 ? " + SFX" : ""
-                    self.showToast("Reel montado (\(orderedURLs.count) planos\(lookNote)\(sfxNote))!")
+                    let capNote = self.includeDynamicCaptions ? " + Legendas" : ""
+                    self.showToast("Reel montado (\(orderedURLs.count) planos\(lookNote)\(sfxNote)\(capNote))!")
                 }
             } catch {
                 await MainActor.run {

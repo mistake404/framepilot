@@ -5,12 +5,23 @@ struct ContentView: View {
     @StateObject private var engine = SpatialCameraEngine()
     @State private var showPackSheet = false
     @State private var showStoryboardSheet = false
+    @State private var showProDrawer = false
     @State private var showExposureSlider = false
     @State private var showRackFocusBar = false
     @State private var showTeleprompter = false
     @State private var showTeleprompterEditor = false
     @AppStorage("framepilot.teleprompter.text") private var teleprompterText: String = "3 segundos para prender atenção: mostra primeiro o resultado final, depois explica o passo a passo com energia!"
     @AppStorage("framepilot.teleprompter.speed") private var teleprompterSpeed: Double = 28.0
+
+    private var isAnyProFeatureActive: Bool {
+        engine.exposureBias != 0 ||
+        engine.timerOption != .off ||
+        engine.aspectMask != .full ||
+        engine.isVirtualDollyActive ||
+        engine.focusMarkA != nil ||
+        engine.showGhostOverlay ||
+        engine.cameraPosition == .front
+    }
 
     var body: some View {
         ZStack {
@@ -217,8 +228,28 @@ struct ContentView: View {
                     .transition(.opacity)
                 }
 
-                // Pro Controls strip: Lenses + EV + Flash/Quality + Timer
-                HStack(spacing: 7) {
+                // Collapsible Pro Drawer
+                if showProDrawer {
+                    ProControlsDrawerView(
+                        engine: engine,
+                        showExposureSlider: $showExposureSlider,
+                        showRackFocusBar: $showRackFocusBar,
+                        onClose: {
+                            withAnimation(.spring(response: 0.32, dampingFraction: 0.8)) {
+                                showProDrawer = false
+                            }
+                        }
+                    )
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 8)
+                    .transition(.asymmetric(
+                        insertion: .scale(scale: 0.94).combined(with: .opacity).combined(with: .move(edge: .bottom)),
+                        removal: .scale(scale: 0.94).combined(with: .opacity).combined(with: .move(edge: .bottom))
+                    ))
+                }
+
+                // Clean Viewfinder primary dock: Lenses (.5, 1x, 2x, 5x) + PRO Drawer button
+                HStack(spacing: 8) {
                     if engine.availableLenses.count > 1 {
                         HStack(spacing: 3) {
                             ForEach(engine.availableLenses, id: \.self) { lens in
@@ -230,148 +261,47 @@ struct ContentView: View {
                                     Text(isSelected ? "\(label)x" : label)
                                         .font(.system(size: 11, weight: .bold, design: .monospaced))
                                         .foregroundColor(isSelected ? .yellow : .white)
-                                        .frame(width: 32, height: 26)
+                                        .frame(width: 34, height: 28)
                                         .background(
-                                            Circle().fill(isSelected ? Color.black.opacity(0.75) : Color.clear)
+                                            Circle().fill(isSelected ? Color.black.opacity(0.8) : Color.clear)
                                         )
                                 }
                             }
                         }
                         .padding(.horizontal, 5)
                         .padding(.vertical, 3)
-                        .background(Capsule().fill(Color.black.opacity(0.48)))
+                        .background(Capsule().fill(Color.black.opacity(0.52)))
                     }
 
-                    // EV button
+                    // PRO button with active indicator
                     Button {
-                        withAnimation(.easeInOut(duration: 0.18)) {
-                            showExposureSlider.toggle()
+                        withAnimation(.spring(response: 0.32, dampingFraction: 0.8)) {
+                            showProDrawer.toggle()
                         }
                     } label: {
-                        HStack(spacing: 3) {
-                            Image(systemName: "plusminus.circle")
-                                .font(.system(size: 11, weight: .semibold))
-                            Text(engine.exposureBias == 0 ? "EV" : String(format: "%+.1f", engine.exposureBias))
-                                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        }
-                        .foregroundColor(showExposureSlider || engine.exposureBias != 0 ? .yellow : .white)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 6)
-                        .background(Capsule().fill(Color.black.opacity(0.5)))
-                    }
-
-                    // Flash (Photo) or Quality 4K30/1080p60 (Video)
-                    if engine.captureMode == .photo {
-                        Button {
-                            engine.cycleFlash()
-                        } label: {
-                            Image(systemName: engine.flashOption.iconName)
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundColor(engine.flashOption == .on ? .yellow : .white)
-                                .frame(width: 30, height: 28)
-                                .background(Circle().fill(Color.black.opacity(0.5)))
-                        }
-                    } else {
-                        Button {
-                            engine.toggleVideoQuality()
-                        } label: {
-                            Text(engine.videoQuality.rawValue)
-                                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                .foregroundColor(engine.videoQuality == .uhd4K30 ? .yellow : .cyan)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 6)
-                                .background(Capsule().fill(Color.black.opacity(0.5)))
-                        }
-                        .disabled(engine.isRecording)
-                    }
-
-                    // Hollywood Rack Focus toggle
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.18)) {
-                            showRackFocusBar.toggle()
-                        }
-                    } label: {
-                        HStack(spacing: 3) {
-                            Image(systemName: "camera.aperture")
-                                .font(.system(size: 11, weight: .semibold))
-                            Text("Rack")
-                                .font(.system(size: 10, weight: .bold))
-                        }
-                        .foregroundColor(showRackFocusBar || engine.focusMarkA != nil ? .yellow : .white)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 6)
-                        .background(Capsule().fill(Color.black.opacity(0.5)))
-                    }
-
-                    // 3D Virtual Dolly toggle
-                    Button {
-                        engine.toggleVirtualDolly()
-                    } label: {
-                        HStack(spacing: 3) {
-                            Image(systemName: "point.3.filled.connected.trianglepath.dotted")
+                        HStack(spacing: 5) {
+                            Image(systemName: showProDrawer ? "chevron.down" : "slider.horizontal.3")
                                 .font(.system(size: 11, weight: .bold))
-                            Text("Dolly")
-                                .font(.system(size: 10, weight: .bold))
-                        }
-                        .foregroundColor(engine.isVirtualDollyActive ? .cyan : .white)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 6)
-                        .background(Capsule().fill(Color.black.opacity(0.5)))
-                    }
-
-                    // Aspect Mask (9:16 / 4:5 / 16:9)
-                    Button {
-                        engine.cycleAspectMask()
-                    } label: {
-                        Text(engine.aspectMask.rawValue)
-                            .font(.system(size: 10, weight: .bold, design: .monospaced))
-                            .foregroundColor(engine.aspectMask == .full ? .white : .cyan)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 6)
-                            .background(Capsule().fill(Color.black.opacity(0.5)))
-                    }
-
-                    // Ghost Frame (Match Cut) toggle
-                    Button {
-                        engine.toggleGhostOverlay()
-                    } label: {
-                        Image(systemName: "square.on.square.dashed")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundColor(engine.showGhostOverlay ? .cyan : (engine.ghostImage != nil ? .white : .white.opacity(0.45)))
-                            .frame(width: 30, height: 28)
-                            .background(Circle().fill(Color.black.opacity(0.5)))
-                    }
-
-                    // Flip Front / Back Camera
-                    Button {
-                        engine.flipCamera()
-                    } label: {
-                        Image(systemName: "camera.rotate")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundColor(engine.cameraPosition == .front ? .yellow : .white)
-                            .frame(width: 30, height: 28)
-                            .background(Circle().fill(Color.black.opacity(0.5)))
-                    }
-                    .disabled(engine.isRecording)
-
-                    // Self-timer (Off / 3s / 10s)
-                    Button {
-                        engine.cycleTimer()
-                    } label: {
-                        HStack(spacing: 3) {
-                            Image(systemName: "timer")
-                                .font(.system(size: 11, weight: .semibold))
-                            if engine.timerOption != .off {
-                                Text(engine.timerOption.label)
-                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            Text("PRO")
+                                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                            if isAnyProFeatureActive {
+                                Circle()
+                                    .fill(Color.yellow)
+                                    .frame(width: 5, height: 5)
                             }
                         }
-                        .foregroundColor(engine.timerOption == .off ? .white : .yellow)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 6)
-                        .background(Capsule().fill(Color.black.opacity(0.5)))
+                        .foregroundColor(showProDrawer || isAnyProFeatureActive ? .yellow : .white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(
+                            Capsule()
+                                .fill(Color.black.opacity(0.52))
+                                .overlay(
+                                    Capsule()
+                                        .stroke(isAnyProFeatureActive ? Color.yellow.opacity(0.6) : Color.white.opacity(0.14), lineWidth: 1)
+                                )
+                        )
                     }
-                    .disabled(engine.isRecording)
                 }
                 .padding(.bottom, 10)
 
@@ -704,6 +634,213 @@ private struct SessionStoryboardButton: View {
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .stroke(videoCount > 0 ? Color.yellow.opacity(0.6) : Color.clear, lineWidth: 1)
+                )
+        )
+    }
+}
+
+// MARK: - Pro Drawer Components
+
+private struct ProControlsDrawerView: View {
+    @ObservedObject var engine: SpatialCameraEngine
+    @Binding var showExposureSlider: Bool
+    @Binding var showRackFocusBar: Bool
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(spacing: 12) {
+            // Header
+            HStack {
+                HStack(spacing: 6) {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundColor(.yellow)
+                    Text("CONTROLOS PRO")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .foregroundColor(.white)
+                }
+
+                Spacer()
+
+                Button(action: onClose) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 18))
+                        .foregroundColor(.white.opacity(0.65))
+                }
+            }
+            .padding(.horizontal, 4)
+
+            // Grid of Pro Tools (2 Rows of 4 Tiles)
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 8) {
+                // 1. Exposure (EV)
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        showExposureSlider.toggle()
+                    }
+                } label: {
+                    ProDrawerTile(
+                        icon: "plusminus.circle",
+                        title: "Exposição",
+                        value: engine.exposureBias == 0 ? "0.0 EV" : String(format: "%+.1f EV", engine.exposureBias),
+                        isActive: showExposureSlider || engine.exposureBias != 0,
+                        accentColor: .yellow
+                    )
+                }
+
+                // 2. Flash / Quality
+                if engine.captureMode == .photo {
+                    Button {
+                        engine.cycleFlash()
+                    } label: {
+                        ProDrawerTile(
+                            icon: engine.flashOption.iconName,
+                            title: "Flash",
+                            value: engine.flashOption == .auto ? "Auto" : (engine.flashOption == .on ? "On" : "Off"),
+                            isActive: engine.flashOption == .on,
+                            accentColor: .yellow
+                        )
+                    }
+                } else {
+                    Button {
+                        engine.toggleVideoQuality()
+                    } label: {
+                        ProDrawerTile(
+                            icon: "video.badge.waveform",
+                            title: "Qualidade",
+                            value: engine.videoQuality.rawValue,
+                            isActive: engine.videoQuality == .uhd4K30,
+                            accentColor: engine.videoQuality == .uhd4K30 ? .yellow : .cyan
+                        )
+                    }
+                    .disabled(engine.isRecording)
+                }
+
+                // 3. Flip Camera
+                Button {
+                    engine.flipCamera()
+                } label: {
+                    ProDrawerTile(
+                        icon: "camera.rotate",
+                        title: "Câmara",
+                        value: engine.cameraPosition == .front ? "Frontal" : "Traseira",
+                        isActive: engine.cameraPosition == .front,
+                        accentColor: .yellow
+                    )
+                }
+                .disabled(engine.isRecording)
+
+                // 4. Self-Timer
+                Button {
+                    engine.cycleTimer()
+                } label: {
+                    ProDrawerTile(
+                        icon: "timer",
+                        title: "Timer",
+                        value: engine.timerOption == .off ? "Desligado" : engine.timerOption.label,
+                        isActive: engine.timerOption != .off,
+                        accentColor: .yellow
+                    )
+                }
+                .disabled(engine.isRecording)
+
+                // 5. Aspect Mask
+                Button {
+                    engine.cycleAspectMask()
+                } label: {
+                    ProDrawerTile(
+                        icon: "aspectratio",
+                        title: "Máscara",
+                        value: engine.aspectMask.rawValue,
+                        isActive: engine.aspectMask != .full,
+                        accentColor: .cyan
+                    )
+                }
+
+                // 6. Ghost Frame (Match Cut)
+                Button {
+                    engine.toggleGhostOverlay()
+                } label: {
+                    ProDrawerTile(
+                        icon: "square.on.square.dashed",
+                        title: "Ghost",
+                        value: engine.showGhostOverlay ? "Ativo" : "Off",
+                        isActive: engine.showGhostOverlay,
+                        accentColor: .cyan
+                    )
+                }
+
+                // 7. Virtual Dolly 3D
+                Button {
+                    engine.toggleVirtualDolly()
+                } label: {
+                    ProDrawerTile(
+                        icon: "point.3.filled.connected.trianglepath.dotted",
+                        title: "Dolly 3D",
+                        value: engine.isVirtualDollyActive ? "Ligado" : "Off",
+                        isActive: engine.isVirtualDollyActive,
+                        accentColor: .cyan
+                    )
+                }
+
+                // 8. Hollywood Rack Focus
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        showRackFocusBar.toggle()
+                    }
+                } label: {
+                    ProDrawerTile(
+                        icon: "camera.aperture",
+                        title: "Rack Focus",
+                        value: (engine.focusMarkA != nil || engine.focusMarkB != nil) ? "Marcado" : (showRackFocusBar ? "Aberto" : "Off"),
+                        isActive: showRackFocusBar || engine.focusMarkA != nil,
+                        accentColor: .yellow
+                    )
+                }
+            }
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(Color.black.opacity(0.85))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .stroke(Color.white.opacity(0.16), lineWidth: 1)
+                )
+        )
+    }
+}
+
+private struct ProDrawerTile: View {
+    let icon: String
+    let title: String
+    let value: String
+    let isActive: Bool
+    let accentColor: Color
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(isActive ? accentColor : .white)
+
+            Text(title)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundColor(.white.opacity(0.75))
+
+            Text(value)
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundColor(isActive ? accentColor : .white.opacity(0.9))
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 58)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(isActive ? accentColor.opacity(0.2) : Color.white.opacity(0.08))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(isActive ? accentColor.opacity(0.55) : Color.white.opacity(0.08), lineWidth: 1)
                 )
         )
     }

@@ -11,8 +11,8 @@ settings:
     SWIFT_VERSION: "5.9"
     TARGETED_DEVICE_FAMILY: "1"
     SUPPORTS_MACCATALYST: "NO"
-    MARKETING_VERSION: "1.0.0"
-    CURRENT_PROJECT_VERSION: "10"
+    MARKETING_VERSION: "1.1.0"
+    CURRENT_PROJECT_VERSION: "11"
 
 targets:
   FramePilot:
@@ -39,3 +39,4 @@ targets:
       - sdk: SwiftUI.framework
       - sdk: UIKit.framework
       - sdk: Vision.framework
+      - sdk: Speech.framework

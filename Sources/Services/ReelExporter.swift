@@ -42,11 +42,12 @@ enum ReelExporter {
         }
     }
 
-    /// Stitches recorded session video clips in storyboard order, applies optional cinematic color look, inserts transition sound design whooshes, and saves to Photos.
+    /// Stitches recorded session video clips in storyboard order, applies optional cinematic color look, inserts transition sound design whooshes, auto-generates dynamic viral subtitles, and saves to Photos.
     static func exportReel(
         videoURLs: [URL],
         look: ReelLook = .original,
-        includeSoundDesign: Bool = true
+        includeSoundDesign: Bool = true,
+        includeViralCaptions: Bool = false
     ) async throws {
         guard !videoURLs.isEmpty else {
             throw ExportError.noVideoClips
@@ -68,6 +69,7 @@ enum ReelExporter {
         var cursor = CMTime.zero
         var didSetTransform = false
         var transitionCutTimes: [CMTime] = []
+        var clipsWithTiming: [(url: URL, startTimeInReel: Double, duration: Double)] = []
 
         for (index, url) in videoURLs.enumerated() {
             let asset = AVURLAsset(url: url)
@@ -89,6 +91,7 @@ enum ReelExporter {
                 try? compAudioTrack.insertTimeRange(timeRange, of: sourceAudio, at: cursor)
             }
 
+            clipsWithTiming.append((url: url, startTimeInReel: cursor.seconds, duration: duration.seconds))
             cursor = CMTimeAdd(cursor, duration)
             if index < videoURLs.count - 1 {
                 transitionCutTimes.append(cursor)
@@ -97,6 +100,12 @@ enum ReelExporter {
 
         guard cursor.seconds > 0.05 else {
             throw ExportError.noVideoClips
+        }
+
+        // Asynchronously generate dynamic captions if requested
+        var renderedCaptions: [RenderedCaption] = []
+        if includeViralCaptions {
+            renderedCaptions = await CaptionService.generateViralCaptions(for: clipsWithTiming)
         }
 
         // Insert synthesized cinematic whooshes at transition cuts
@@ -132,12 +141,26 @@ enum ReelExporter {
             throw ExportError.exporterCreationFailed
         }
 
-        if look != .original {
+        if look != .original || !renderedCaptions.isEmpty {
+            let captionsRef = renderedCaptions
             let videoComposition = AVMutableVideoComposition(
                 asset: composition,
                 applyingCIFiltersWithHandler: { request in
                     let source = request.sourceImage.clampedToExtent()
-                    let graded = applyLook(look, to: source).cropped(to: request.sourceImage.extent)
+                    var graded = (look != .original)
+                        ? applyLook(look, to: source).cropped(to: request.sourceImage.extent)
+                        : source.cropped(to: request.sourceImage.extent)
+
+                    let currentTime = request.compositionTime.seconds
+                    if let activeCaption = captionsRef.first(where: { currentTime >= $0.startTime && currentTime <= $0.endTime }) {
+                        let frameExtent = request.sourceImage.extent
+                        let badgeExtent = activeCaption.image.extent
+                        let tx = (frameExtent.width - badgeExtent.width) / 2
+                        let ty = frameExtent.height * 0.24 // Centered right above Reels interaction area
+                        let positioned = activeCaption.image.transformed(by: CGAffineTransform(translationX: tx, y: ty))
+                        graded = positioned.composited(over: graded).cropped(to: frameExtent)
+                    }
+
                     request.finish(with: graded, context: nil)
                 }
             )
