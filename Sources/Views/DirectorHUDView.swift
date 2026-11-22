@@ -548,19 +548,25 @@ private struct CoachingBanner: View {
                 .lineLimit(2)
 
             if let shot = activeShot {
+                let hasDistance = telemetry.lidarDistanceMeters != nil
                 let distOK = isDistanceOK(for: shot)
                 let pitchOK = isPitchOK(for: shot)
 
                 HStack(spacing: 9) {
                     Label(shot.lensLabel, systemImage: "camera.aperture")
                         .foregroundColor(.white.opacity(0.82))
-                    Label(shot.distanceLabel, systemImage: distOK ? "checkmark.circle.fill" : "ruler")
-                        .foregroundColor(distOK ? .green : .yellow)
+                    Label(shot.distanceLabel, systemImage: (hasDistance && distOK) ? "checkmark.circle.fill" : "ruler")
+                        .foregroundColor(hasDistance ? (distOK ? .green : .yellow) : .white.opacity(0.65))
                     Label(shot.pitchLabel, systemImage: pitchOK ? "checkmark.circle.fill" : "angle")
                         .foregroundColor(pitchOK ? .green : .yellow)
                     if shot.preferredMode == .video {
-                        Label(shot.durationLabel, systemImage: "stopwatch")
-                            .foregroundColor(.white.opacity(0.82))
+                        if shot.targetDurationSeconds > 0 {
+                            Label(shot.durationLabel, systemImage: "stopwatch")
+                                .foregroundColor(.white.opacity(0.82))
+                        } else {
+                            Label("Livre", systemImage: "infinity")
+                                .foregroundColor(.white.opacity(0.82))
+                        }
                     } else {
                         Label(shot.preferredMode.rawValue, systemImage: "camera.fill")
                             .foregroundColor(.white.opacity(0.82))

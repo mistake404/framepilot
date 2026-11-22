@@ -1946,6 +1946,14 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     }
 
     private func currentVisionOrientation() -> CGImagePropertyOrientation {
+        if cameraPosition == .front {
+            switch UIDevice.current.orientation {
+            case .landscapeLeft: return .downMirrored
+            case .landscapeRight: return .upMirrored
+            case .portraitUpsideDown: return .rightMirrored
+            default: return .leftMirrored
+            }
+        }
         switch UIDevice.current.orientation {
         case .landscapeLeft: return .up
         case .landscapeRight: return .down
