@@ -213,6 +213,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     private var movieInFlight = false
     private var stopMovieRequested = false
     private var lastDepthTimestamp: TimeInterval = 0
+    private var lastValidDepthTimestamp: TimeInterval = 0
     private var analysisGeneration: UInt = 0
     private var depthConnection: AVCaptureConnection?
     private var visionConnection: AVCaptureConnection?
@@ -2119,7 +2120,17 @@ extension SpatialCameraEngine: AVCaptureDepthDataOutputDelegate {
             guard depthData.availableDepthDataTypes.contains(type) else { return }
             depthMap = depthData.converting(toDepthDataType: type).depthDataMap
         }
-        guard let rawDistance = Self.sampleCenterDepth(from: depthMap) else { return }
+        guard let rawDistance = Self.sampleCenterDepth(from: depthMap) else {
+            if now - lastValidDepthTimestamp >= 0.5 {
+                sensorLock.lock()
+                if generation == analysisGeneration, depthConnection === connection {
+                    smoothedDistanceMeters = nil
+                }
+                sensorLock.unlock()
+            }
+            return
+        }
+        lastValidDepthTimestamp = now
 
         sensorLock.lock()
         defer { sensorLock.unlock() }

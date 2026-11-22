@@ -51,19 +51,11 @@ enum ShotCoachEngine {
             )
         }
 
-        // Backlight guard before recording
-        if !isRecording && isBacklit {
-            return CoachingAdvice(
-                primaryInstruction: "Contraluz forte — roda 45° para a luz",
-                secondaryHint: "Ou sobe a exposição (+0,7 EV) para iluminar o sujeito.",
-                alignmentScore: 0.58,
-                isLocked: false
-            )
-        }
-
         // Face framing check (headroom & Reels bottom caption safe zone)
         if let face = detectedFaceRect {
-            if face.minY < 0.08 {
+            let tightShot = target?.kind == .closeUp || target?.kind == .detail
+            let minHeadroom: CGFloat = tightShot ? 0.02 : 0.08
+            if face.minY < minHeadroom {
                 return CoachingAdvice(
                     primaryInstruction: "Dá mais ar acima da cabeça",
                     secondaryHint: "Inclina ligeiramente para cima ou afasta-te um pouco.",
@@ -71,7 +63,7 @@ enum ShotCoachEngine {
                     isLocked: false
                 )
             }
-            if face.midY > 0.68 {
+            if !tightShot && face.midY > 0.68 {
                 return CoachingAdvice(
                     primaryInstruction: "Sobe o rosto para o terço superior",
                     secondaryHint: "Evita a zona inferior de legendas no Reels/TikTok.",
@@ -101,13 +93,14 @@ enum ShotCoachEngine {
 
         // 1. Roll score (horizon) — gracefully relaxed/disabled on steep picado (top-down) & contrapicado
         let absPitch = abs(pitchDegrees)
+        let handheldRollFloor = max(2.0, target.maxRollDegrees)
         let baseMaxRoll: Double
         if absPitch >= 42.0 {
             baseMaxRoll = 90.0
         } else if absPitch >= 20.0 {
-            baseMaxRoll = target.maxRollDegrees * 1.8
+            baseMaxRoll = handheldRollFloor * 1.8
         } else {
-            baseMaxRoll = target.maxRollDegrees
+            baseMaxRoll = handheldRollFloor
         }
         // Hysteresis prevents rapid green/yellow flickering at the edge of the target zone
         let effectiveMaxRoll = wasLocked ? (baseMaxRoll + 2.0) : baseMaxRoll
@@ -144,8 +137,9 @@ enum ShotCoachEngine {
 
         let pitchLockTol = wasLocked ? 5.5 : 3.5
         let distLockTol = wasLocked ? 0.25 : 0.15
+        let rollLockTol = 0.5
         let combinedScore = (rollScore * 0.25) + (pitchScore * 0.40) + (distanceScore * 0.35)
-        let isLocked = rollExcess == 0 && abs(pitchDelta) <= pitchLockTol && abs(distanceDelta ?? 0) <= distLockTol
+        let isLocked = rollExcess <= rollLockTol && abs(pitchDelta) <= pitchLockTol && abs(distanceDelta ?? 0) <= distLockTol
 
         if target.preferredMode == .photo && motionPace == .tooFast {
             return CoachingAdvice(
@@ -165,9 +159,14 @@ enum ShotCoachEngine {
             } else {
                 lockedTitle = "Ângulo perfeito — dispara!"
             }
-            let hint = subjectCrowdedEdge
-                ? "Dica: dá um pouco de margem ao sujeito • \(target.movementHint)"
-                : "\(target.movementHint) • \(target.directorTip)"
+            let hint: String
+            if !isRecording && isBacklit {
+                hint = "Contraluz — roda 45° para a luz ou sobe +0,7 EV"
+            } else if subjectCrowdedEdge {
+                hint = "Dica: dá um pouco de margem ao sujeito • \(target.movementHint)"
+            } else {
+                hint = "\(target.movementHint) • \(target.directorTip)"
+            }
             return CoachingAdvice(
                 primaryInstruction: lockedTitle,
                 secondaryHint: hint,
@@ -176,7 +175,7 @@ enum ShotCoachEngine {
             )
         }
 
-        if rollExcess > 1.5 {
+        if rollExcess > rollLockTol {
             let dir = rollDegrees > 0 ? "para a esquerda" : "para a direita"
             return CoachingAdvice(
                 primaryInstruction: "Nivela o horizonte (\(dir))",
@@ -186,7 +185,7 @@ enum ShotCoachEngine {
             )
         }
 
-        if abs(pitchDelta) > 3.0 {
+        if abs(pitchDelta) > pitchLockTol {
             let deg = Int(abs(pitchDelta).rounded())
             let instruction = pitchDelta > 0
                 ? "Inclina mais para cima (+\(deg)°)"
@@ -199,7 +198,7 @@ enum ShotCoachEngine {
             )
         }
 
-        if let dd = distanceDelta, abs(dd) > 0.15 {
+        if let dd = distanceDelta, abs(dd) > distLockTol {
             let meters = abs(dd)
             let formatted = meters < 1.0
                 ? "\(Int((meters * 100).rounded())) cm"
