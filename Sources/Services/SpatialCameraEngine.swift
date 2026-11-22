@@ -105,6 +105,8 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     @Published var customPacks: [ScenePack] = CustomPackStore.load()
     @Published var selectedPack: ScenePack = ScenePack.presets[0]
     @Published var activeShotIndex: Int = 0
+    @Published var freeModeTargetKind: ShotKind? = nil
+    @Published var freeModeTakeOrder: [String] = []
     @Published var completedShotIds: Set<String> = []
     @Published var sessionTakes: [String: SessionTake] = [:]
     @Published var captureMode: CaptureMode = .photo {
@@ -277,10 +279,24 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     }
 
     var activeShot: ShotTemplate? {
-        guard !selectedPack.shots.isEmpty, selectedPack.shots.indices.contains(activeShotIndex) else {
-            return nil
+        if !selectedPack.shots.isEmpty {
+            guard selectedPack.shots.indices.contains(activeShotIndex) else { return nil }
+            return selectedPack.shots[activeShotIndex]
         }
-        return selectedPack.shots[activeShotIndex]
+        guard let kind = freeModeTargetKind else { return nil }
+        return ShotTemplate(
+            id: "free_\(kind.rawValue)",
+            title: kind.rawValue,
+            kind: kind,
+            preferredMode: captureMode,
+            recommendedLens: activeLens,
+            targetDurationSeconds: 0,
+            targetDistanceRange: kind.defaultDistanceRange,
+            targetPitchRange: kind.defaultPitchRange,
+            maxRollDegrees: 3.0,
+            movementHint: kind.defaultMovementHint,
+            directorTip: "Modo livre guiado — \(kind.defaultMovementHint)"
+        )
     }
 
     var targetDurationProgress: Double {
@@ -290,8 +306,19 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         return min(1.0, recordingElapsed / target)
     }
 
+    var orderedSessionTakes: [SessionTake] {
+        if !selectedPack.shots.isEmpty {
+            return selectedPack.shots.compactMap { sessionTakes[$0.id] }
+        }
+        return freeModeTakeOrder.compactMap { sessionTakes[$0] }
+    }
+
+    var orderedVideoTakes: [SessionTake] {
+        orderedSessionTakes.filter { $0.isVideo && $0.fileURL != nil }
+    }
+
     var recordedVideoCount: Int {
-        selectedPack.shots.compactMap { sessionTakes[$0.id] }.filter { $0.isVideo && $0.fileURL != nil }.count
+        orderedVideoTakes.count
     }
 
     override init() {
@@ -842,6 +869,9 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     func setCaptureMode(_ mode: CaptureMode) {
         guard !captureBusy else { return }
         captureMode = mode
+        if selectedPack.shots.isEmpty {
+            currentTargetShot = activeShot
+        }
     }
 
     func toggleVideoQuality() {
@@ -1123,6 +1153,8 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         clearSessionFiles()
         selectedPack = pack
         activeShotIndex = 0
+        freeModeTargetKind = nil
+        freeModeTakeOrder.removeAll()
         completedShotIds.removeAll()
         sessionTakes.removeAll()
         continuityReference = nil
@@ -1248,12 +1280,28 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         try? FileManager.default.removeItem(at: selectedLUTURL.deletingLastPathComponent())
     }
 
+    func selectFreeModeKind(_ kind: ShotKind?) {
+        guard selectedPack.shots.isEmpty else { return }
+        freeModeTargetKind = kind
+        currentTargetShot = activeShot
+        lastAdviceUpdate = 0
+        wasLocked = false
+    }
+
+    func removeFreeModeTake(id: String) {
+        guard !captureBusy, !isExportingReel else { return }
+        freeModeTakeOrder.removeAll { $0 == id }
+        if let url = sessionTakes[id]?.fileURL {
+            cancelCaptionPreparation()
+            editedTranscriptions.removeValue(forKey: url)
+            try? FileManager.default.removeItem(at: url)
+        }
+        sessionTakes.removeValue(forKey: id)
+    }
+
     func prepareCaptionsForEditing() {
         guard !isPreparingCaptions else { return }
-        let orderedURLs = selectedPack.shots
-            .compactMap { sessionTakes[$0.id] }
-            .filter { $0.isVideo }
-            .compactMap { $0.fileURL }
+        let orderedURLs = orderedVideoTakes.compactMap { $0.fileURL }
         guard !orderedURLs.isEmpty else { return }
 
         let missing = orderedURLs.filter { editedTranscriptions[$0] == nil }
@@ -1283,10 +1331,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
 
     func exportSessionReel(look: ReelLook = .original) {
         guard !isExportingReel, !isImportingMusic, !isImportingLUT, !captureBusy else { return }
-        let orderedURLs = selectedPack.shots
-            .compactMap { sessionTakes[$0.id] }
-            .filter { $0.isVideo }
-            .compactMap { $0.fileURL }
+        let orderedURLs = orderedVideoTakes.compactMap { $0.fileURL }
 
         guard !orderedURLs.isEmpty else {
             showToast("Grava pelo menos 1 plano em vídeo primeiro")
@@ -1770,8 +1815,13 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         guard startID != nil, !captureBusy, !isExportingReel else { return false }
         focusLoupe.dismiss()
         captureBusy = true
-        captureContext = ShotContext(id: activeShot?.id ?? UUID().uuidString,
-                                     title: activeShot?.title ?? "Plano Livre", generation: packGeneration)
+        if !selectedPack.shots.isEmpty, let shot = activeShot {
+            captureContext = ShotContext(id: shot.id, title: shot.title, generation: packGeneration)
+        } else {
+            let number = freeModeTakeOrder.count + 1
+            let title = freeModeTargetKind.map { "\($0.rawValue) #\(number)" } ?? "Take \(number)"
+            captureContext = ShotContext(id: UUID().uuidString, title: title, generation: packGeneration)
+        }
         return true
     }
 
@@ -2065,6 +2115,9 @@ extension SpatialCameraEngine: AVCaptureFileOutputRecordingDelegate {
         }
         sessionTakes[shot.id] = SessionTake(shotId: shot.id, shotTitle: shot.title, isVideo: url != nil,
                                             fileURL: url, thumbnail: preview, durationSeconds: duration)
+        if selectedPack.shots.isEmpty, !freeModeTakeOrder.contains(shot.id) {
+            freeModeTakeOrder.append(shot.id)
+        }
     }
 
     private func saveCapture(_ changes: @escaping () -> Void) {

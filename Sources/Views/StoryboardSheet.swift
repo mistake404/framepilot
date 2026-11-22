@@ -29,15 +29,19 @@ struct StoryboardSheet: View {
     var body: some View {
         NavigationStack {
             Group {
-                if engine.selectedPack.shots.isEmpty {
+                if engine.selectedPack.shots.isEmpty && engine.orderedSessionTakes.isEmpty {
                     ContentUnavailableView(
                         "Modo livre",
                         systemImage: "film.stack",
-                        description: Text("Escolhe um guião com planos para montar automaticamente o teu Reel.")
+                        description: Text("Grava 1 ou mais vídeos em Modo Livre para montar, editar legendas e exportar o teu Reel.")
                     )
                 } else {
                     List {
-                        plansSection
+                        if engine.selectedPack.shots.isEmpty {
+                            freeModeTakesSection
+                        } else {
+                            plansSection
+                        }
                         exportOptions
                         musicSection
                     }
@@ -97,6 +101,65 @@ struct StoryboardSheet: View {
                     PhotoPreviewSheet(image: image)
                 }
             }
+        }
+    }
+
+    private var freeModeTakesSection: some View {
+        Section {
+            ForEach(Array(engine.orderedSessionTakes.enumerated()), id: \.element.shotId) { index, take in
+                let thumbnail = ShotThumbnail(image: take.thumbnail, symbol: take.isVideo ? "video.fill" : "camera.fill")
+                HStack(spacing: 12) {
+                    if let url = take.fileURL, take.isVideo {
+                        Button {
+                            previewVideoURL = url
+                        } label: {
+                            thumbnail.overlay {
+                                Image(systemName: "play.fill")
+                                    .font(.footnote.bold())
+                                    .foregroundStyle(.white)
+                                    .frame(width: 28, height: 28)
+                                    .background(.black.opacity(0.72), in: Circle())
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Reproduzir take \(index + 1), \(take.shotTitle)")
+                    } else if let thumb = take.thumbnail, !take.isVideo {
+                        Button {
+                            previewPhotoImage = thumb
+                        } label: {
+                            thumbnail
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Ver fotografia do take \(index + 1)")
+                    } else {
+                        thumbnail.accessibilityHidden(true)
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("\(index + 1). \(take.shotTitle)")
+                            .font(.headline)
+                        let duration = take.durationSeconds.formatted(.number.locale(Locale(identifier: "pt_PT")).precision(.fractionLength(1)))
+                        Label(take.isVideo ? "Vídeo · \(duration) s" : "Fotografia captada",
+                              systemImage: "checkmark.circle.fill")
+                            .font(.caption.weight(.medium))
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    Button(role: .destructive) {
+                        engine.removeFreeModeTake(id: take.shotId)
+                    } label: {
+                        Image(systemName: "trash")
+                            .frame(minWidth: 44, minHeight: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(engine.isExportingReel)
+                    .accessibilityLabel("Remover take \(index + 1)")
+                }
+                .padding(.vertical, 4)
+            }
+        } header: {
+            Text("Modo Livre")
         }
     }
 
@@ -413,11 +476,9 @@ private struct CaptionEditorSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     private var videoTakes: [(shotTitle: String, url: URL)] {
-        engine.selectedPack.shots.compactMap { shot in
-            guard let take = engine.sessionTakes[shot.id],
-                  take.isVideo,
-                  let url = take.fileURL else { return nil }
-            return (shot.title, url)
+        engine.orderedVideoTakes.compactMap { take in
+            guard let url = take.fileURL else { return nil }
+            return (take.shotTitle, url)
         }
     }
 

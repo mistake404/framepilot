@@ -339,6 +339,12 @@ struct ContentView: View {
                         onSelect: { engine.selectShot(at: $0) }
                     )
                     .padding(.bottom, 12)
+                } else {
+                    FreeModeShotPickerBar(
+                        selectedKind: engine.freeModeTargetKind,
+                        onSelect: { engine.selectFreeModeKind($0) }
+                    )
+                    .padding(.bottom, 12)
                 }
 
                 bottomCaptureDock
@@ -484,7 +490,7 @@ struct ContentView: View {
                     showStoryboardSheet = true
                 } label: {
                     SessionStoryboardButton(
-                        completedCount: engine.completedShotIds.count,
+                        completedCount: engine.selectedPack.shots.isEmpty ? engine.freeModeTakeOrder.count : engine.completedShotIds.count,
                         totalCount: engine.selectedPack.shots.count,
                         videoCount: engine.recordedVideoCount
                     )
@@ -975,5 +981,53 @@ private struct TakeVerdictCard: View {
                         .stroke(accent.opacity(0.65), lineWidth: 1.2)
                 )
         )
+    }
+}
+
+private struct FreeModeShotPickerBar: View {
+    let selectedKind: ShotKind?
+    let onSelect: (ShotKind?) -> Void
+
+    private let selectionFeedback = UISelectionFeedbackGenerator()
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                chip(title: "Livre", icon: "sparkles", isSelected: selectedKind == nil) {
+                    onSelect(nil)
+                }
+                ForEach(ShotKind.allCases) { kind in
+                    chip(title: kind.rawValue, icon: kind.iconName, isSelected: selectedKind == kind) {
+                        onSelect(selectedKind == kind ? nil : kind)
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+        }
+    }
+
+    private func chip(title: String, icon: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+        Button {
+            selectionFeedback.selectionChanged()
+            action()
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: .semibold))
+                Text(title)
+                    .font(.system(size: 12, weight: .bold))
+            }
+            .foregroundColor(isSelected ? .black : .white)
+            .padding(.horizontal, 12)
+            .frame(minHeight: 38)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(isSelected ? Color.yellow : Color.black.opacity(0.58))
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .stroke(Color.white.opacity(isSelected ? 0 : 0.2), lineWidth: 1)
+                    )
+            )
+        }
     }
 }
