@@ -123,6 +123,10 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     @Published private(set) var isImportingMusic = false
     @Published var beatSyncEnabled = true
     @Published var autoDuckingEnabled = true
+    @Published var selectedTransition: ReelTransition = .zoomPunch
+    @Published var removeSilencesEnabled = false
+    @Published private(set) var selectedLUTURL: URL?
+    @Published private(set) var isImportingLUT = false
 
     // UI state lives on the main queue. Capture graph and lens commands live on sessionQueue.
     private var startID: UUID?
@@ -255,8 +259,8 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     }
 
     deinit {
-        if let selectedMusicURL {
-            try? FileManager.default.removeItem(at: selectedMusicURL.deletingLastPathComponent())
+        for url in [selectedMusicURL, selectedLUTURL].compactMap({ $0 }) {
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
         }
         hudTimer?.cancel()
         rackFocusTimer?.cancel()
@@ -950,10 +954,26 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     }
 
     private static func copyMusic(from url: URL) async throws -> URL {
+        let destination = try copyImportedFile(from: url, kind: "Music")
+        do {
+            let asset = AVURLAsset(url: destination)
+            guard let track = try await asset.loadTracks(withMediaType: .audio).first,
+                  try await track.load(.timeRange).duration.seconds > 0 else {
+                throw ReelExporter.ExportError.exportFailed("O ficheiro não contém áudio utilizável.")
+            }
+            try Task.checkCancellation()
+            return destination
+        } catch {
+            try? FileManager.default.removeItem(at: destination.deletingLastPathComponent())
+            throw error
+        }
+    }
+
+    private static func copyImportedFile(from url: URL, kind: String) throws -> URL {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         let files = FileManager.default
-        let directory = files.temporaryDirectory.appendingPathComponent("FramePilot-Music-" + UUID().uuidString,
+        let directory = files.temporaryDirectory.appendingPathComponent("FramePilot-\(kind)-\(UUID().uuidString)",
                                                                       isDirectory: true)
         let destination = directory.appendingPathComponent(url.lastPathComponent)
         try files.createDirectory(at: directory, withIntermediateDirectories: false)
@@ -971,12 +991,6 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
             }
             if let coordinationError { throw coordinationError }
             if let copyError { throw copyError }
-            let asset = AVURLAsset(url: destination)
-            guard let track = try await asset.loadTracks(withMediaType: .audio).first,
-                  try await track.load(.timeRange).duration.seconds > 0 else {
-                throw ReelExporter.ExportError.exportFailed("O ficheiro não contém áudio utilizável.")
-            }
-            try Task.checkCancellation()
             return destination
         } catch {
             try? files.removeItem(at: directory)
@@ -991,8 +1005,38 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         try? FileManager.default.removeItem(at: selectedMusicURL.deletingLastPathComponent())
     }
 
+    @MainActor
+    func selectLUT(_ url: URL) async throws {
+        guard !isExportingReel, !isImportingLUT else { return }
+        isImportingLUT = true
+        defer { isImportingLUT = false }
+        let copy = try await Self.copyLUT(from: url)
+        removeLUT()
+        selectedLUTURL = copy
+    }
+
+    private static func copyLUT(from url: URL) async throws -> URL {
+        guard url.pathExtension.lowercased() == "cube" else { throw CubeLUTLoader.LoadError.invalidCube }
+        let destination = try copyImportedFile(from: url, kind: "LUT")
+        do {
+            _ = try CubeLUTLoader.load(destination)
+            try Task.checkCancellation()
+            return destination
+        } catch {
+            try? FileManager.default.removeItem(at: destination.deletingLastPathComponent())
+            throw error
+        }
+    }
+
+    @MainActor
+    func removeLUT() {
+        guard !isExportingReel, let selectedLUTURL else { return }
+        self.selectedLUTURL = nil
+        try? FileManager.default.removeItem(at: selectedLUTURL.deletingLastPathComponent())
+    }
+
     func exportSessionReel(look: ReelLook = .original) {
-        guard !isExportingReel, !isImportingMusic, !captureBusy else { return }
+        guard !isExportingReel, !isImportingMusic, !isImportingLUT, !captureBusy else { return }
         let orderedURLs = selectedPack.shots
             .compactMap { sessionTakes[$0.id] }
             .filter { $0.isVideo }
@@ -1008,6 +1052,9 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         let music = selectedMusicURL
         let beatSync = beatSyncEnabled
         let ducking = autoDuckingEnabled
+        let transition = selectedTransition
+        let removeSilences = removeSilencesEnabled
+        let lut = selectedLUTURL
         isExportingReel = true
         Task {
             do {
@@ -1018,7 +1065,10 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
                     includeViralCaptions: captions,
                     musicURL: music,
                     beatSyncEnabled: beatSync,
-                    autoDuckingEnabled: ducking
+                    autoDuckingEnabled: ducking,
+                    transition: transition,
+                    removeSilences: removeSilences,
+                    customLUTURL: lut
                 )
                 await MainActor.run {
                     self.isExportingReel = false

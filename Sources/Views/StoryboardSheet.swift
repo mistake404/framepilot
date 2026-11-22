@@ -9,8 +9,20 @@ struct StoryboardSheet: View {
 
     @State private var selectedLook: ReelLook = .film35mm
     @State private var previewVideoURL: URL?
-    @State private var showMusicPicker = false
-    @State private var showMusicError = false
+    @State private var importKind: ImportKind = .music
+    @State private var showFilePicker = false
+    @State private var showImportError = false
+
+    private enum ImportKind {
+        case music, lut
+
+        var contentTypes: [UTType] {
+            switch self {
+            case .music: return [.audio]
+            case .lut: return [UTType(filenameExtension: "cube"), UTType.plainText, UTType.data].compactMap { $0 }
+            }
+        }
+    }
 
     var body: some View {
         NavigationStack {
@@ -33,22 +45,31 @@ struct StoryboardSheet: View {
             }
             .navigationTitle("Storyboard da sessão")
             .navigationBarTitleDisplayMode(.inline)
-            .fileImporter(isPresented: $showMusicPicker, allowedContentTypes: [.audio]) { result in
+            .fileImporter(isPresented: $showFilePicker, allowedContentTypes: importKind.contentTypes) { result in
+                let kind = importKind
                 Task { @MainActor in
                     do {
                         let url = try result.get()
-                        try await engine.selectMusic(url)
+                        switch kind {
+                        case .music: try await engine.selectMusic(url)
+                        case .lut: try await engine.selectLUT(url)
+                        }
                     } catch let error as CocoaError where error.code == .userCancelled {
                         return
                     } catch {
-                        showMusicError = true
+                        showImportError = true
                     }
                 }
             }
-            .alert("Não foi possível importar a música", isPresented: $showMusicError) {
+            .alert(importKind == .music ? "Não foi possível importar a música" : "Não foi possível importar a LUT",
+                   isPresented: $showImportError) {
                 Button("Fechar", role: .cancel) {}
             } message: {
-                Text("Verifica se o ficheiro está disponível e contém uma faixa de áudio que o iPhone consiga ler.")
+                if importKind == .music {
+                    Text("Verifica se o ficheiro está disponível e contém uma faixa de áudio que o iPhone consiga ler.")
+                } else {
+                    Text("Escolhe um ficheiro .cube com uma LUT 3D válida.")
+                }
             }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -145,19 +166,67 @@ struct StoryboardSheet: View {
             }
             .pickerStyle(.menu)
 
+            VStack(alignment: .leading, spacing: 4) {
+                Label("Transição", systemImage: "film")
+                ScrollView(.horizontal) {
+                    HStack(spacing: 6) {
+                        ForEach(ReelTransition.allCases) { transition in
+                            let selected = engine.selectedTransition == transition
+                            Button {
+                                engine.selectedTransition = transition
+                            } label: {
+                                Text(transition.rawValue)
+                                    .font(.subheadline.weight(.medium))
+                                    .foregroundStyle(selected ? Color.black : Color.primary)
+                                    .padding(.horizontal, 12)
+                                    .frame(minHeight: 44)
+                                    .background(selected ? Color.yellow : Color(uiColor: .tertiarySystemFill), in: Capsule())
+                            }
+                            .buttonStyle(.borderless)
+                            .accessibilityAddTraits(selected ? .isSelected : [])
+                        }
+                    }
+                }
+                .scrollIndicators(.hidden)
+            }
+
+            Toggle(isOn: $engine.removeSilencesEnabled) {
+                Label("Smart Jump-Cut (Cortar Silêncios)", systemImage: "scissors")
+            }
             Toggle(isOn: $engine.includeSoundDesign) {
                 Label("Som nas transições", systemImage: "waveform")
             }
             Toggle(isOn: $engine.includeDynamicCaptions) {
                 Label("Legendas dinâmicas", systemImage: "captions.bubble")
             }
+            HStack {
+                Button { openFilePicker(.lut) } label: {
+                    Label(engine.selectedLUTURL?.lastPathComponent ?? "Importar LUT (.cube)", systemImage: "slider.horizontal.3")
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityHint("Abre o seletor de ficheiros LUT.")
+                Spacer()
+                if engine.isImportingLUT {
+                    ProgressView().accessibilityLabel("A importar LUT")
+                } else if engine.selectedLUTURL != nil {
+                    Button(role: .destructive) { engine.removeLUT() } label: {
+                        Image(systemName: "trash").frame(minWidth: 44, minHeight: 44)
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Remover LUT")
+                }
+            }
+            .disabled(engine.isImportingLUT || engine.isImportingMusic)
         }
+        .disabled(engine.isExportingReel)
     }
 
     private var musicSection: some View {
         Section("Música & Ritmo") {
             HStack {
-                Button { showMusicPicker = true } label: {
+                Button { openFilePicker(.music) } label: {
                     Label(engine.selectedMusicURL?.lastPathComponent ?? "Escolher música", systemImage: "music.note")
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -180,7 +249,12 @@ struct StoryboardSheet: View {
             Toggle("Auto-Ducking na Voz", isOn: $engine.autoDuckingEnabled)
                 .disabled(engine.selectedMusicURL == nil)
         }
-        .disabled(engine.isExportingReel || engine.isImportingMusic)
+        .disabled(engine.isExportingReel || engine.isImportingMusic || engine.isImportingLUT)
+    }
+
+    private func openFilePicker(_ kind: ImportKind) {
+        importKind = kind
+        showFilePicker = true
     }
 
     private var exportBar: some View {
@@ -211,7 +285,7 @@ struct StoryboardSheet: View {
                             in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
             .buttonStyle(.plain)
-            .disabled(count == 0 || isExporting || engine.isImportingMusic)
+            .disabled(count == 0 || isExporting || engine.isImportingMusic || engine.isImportingLUT)
 
             Text(count == 0 ? "Grava pelo menos um plano em vídeo para exportar." : "Os vídeos são montados pela ordem do guião e guardados num Reel em Fotografias.")
                 .font(.caption)

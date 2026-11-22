@@ -15,10 +15,20 @@ enum CaptionService {
     private static let font = UIFont.systemFont(ofSize: 58, weight: .black)
     private static let maxTextWidth: CGFloat = 850
 
-    private struct Word {
+    fileprivate struct Word {
         let text: String
         let start: Double
         let end: Double
+    }
+
+    struct Transcription {
+        fileprivate let words: [Word]
+        fileprivate let sourceOrigin: Double
+
+        func cues(in range: CMTimeRange, at reelStart: CMTime) -> [CaptionCue] {
+            CaptionService.makeCues(words, sourceStart: range.start.seconds - sourceOrigin,
+                                    duration: range.duration.seconds, reelStart: reelStart.seconds)
+        }
     }
 
     static func localRecognizer() async -> SFSpeechRecognizer? {
@@ -36,32 +46,31 @@ enum CaptionService {
         return status == .authorized && recognizer.isAvailable ? recognizer : nil
     }
 
-    static func cues(for url: URL, audioTrack: AVAssetTrack, trackStart: CMTime,
-                     range: CMTimeRange, reelStart: CMTime,
-                     recognizer: SFSpeechRecognizer) async -> [CaptionCue] {
+    static func transcribe(_ url: URL, audioTrack: AVAssetTrack, trackStart: CMTime,
+                           range: CMTimeRange, recognizer: SFSpeechRecognizer) async -> Transcription? {
         var recognitionURL = url
-        var sourceStart = range.start.seconds
+        var sourceOrigin = 0.0
         var temporaryURL: URL?
         defer { if let temporaryURL { try? FileManager.default.removeItem(at: temporaryURL) } }
 
         // A movie with a delayed audio track has two possible time origins. Give
-        // Speech exactly the inserted audio, starting at zero, for these clips.
+        // Speech the relevant audio starting at zero, then map it back to the source.
         if trackStart != .zero {
             let audio = AVMutableComposition()
             guard let track = audio.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
-            else { return [] }
+            else { return nil }
             do {
                 try track.insertTimeRange(range, of: audioTrack, at: .zero)
-            } catch { return [] }
+            } catch { return nil }
             guard let export = AVAssetExportSession(asset: audio, presetName: AVAssetExportPresetAppleM4A)
-            else { return [] }
+            else { return nil }
             recognitionURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).m4a")
             temporaryURL = recognitionURL
             export.outputURL = recognitionURL
             export.outputFileType = .m4a
             await export.export()
-            guard export.status == .completed, !Task.isCancelled else { return [] }
-            sourceStart = 0
+            guard export.status == .completed, !Task.isCancelled else { return nil }
+            sourceOrigin = range.start.seconds
         }
 
         let request = SFSpeechURLRecognitionRequest(url: recognitionURL)
@@ -89,10 +98,9 @@ enum CaptionService {
         }
 
         for await words in results {
-            return makeCues(words, sourceStart: sourceStart, duration: range.duration.seconds,
-                            reelStart: reelStart.seconds)
+            return Transcription(words: words, sourceOrigin: sourceOrigin)
         }
-        return []
+        return nil
     }
 
     private static func makeCues(_ words: [Word], sourceStart: Double, duration: Double,

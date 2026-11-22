@@ -14,6 +14,15 @@ enum ReelLook: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+enum ReelTransition: String, CaseIterable, Identifiable {
+    case cut = "Corte Seco"
+    case zoomPunch = "Zoom Punch"
+    case whipBlur = "Whip Blur"
+    case filmFlash = "Flash 35mm"
+
+    var id: String { rawValue }
+}
+
 struct SessionTake: Identifiable {
     let id = UUID()
     let shotId: String
@@ -50,7 +59,10 @@ enum ReelExporter {
         includeViralCaptions: Bool = false,
         musicURL: URL? = nil,
         beatSyncEnabled: Bool = true,
-        autoDuckingEnabled: Bool = true
+        autoDuckingEnabled: Bool = true,
+        transition: ReelTransition = .cut,
+        removeSilences: Bool = false,
+        customLUTURL: URL? = nil
     ) async throws {
         guard !videoURLs.isEmpty else {
             throw ExportError.noVideoClips
@@ -92,11 +104,14 @@ enum ReelExporter {
             music = nil
         }
         var speech: [Range<Double>] = []
+        let duckMusic = music != nil && autoDuckingEnabled
+        let lut = customLUTURL.flatMap { try? CubeLUTLoader.load($0) }
         let recognizer = includeViralCaptions ? await CaptionService.localRecognizer() : nil
         for (url, asset, video, sourceRange) in sources {
             try Task.checkCancellation()
-            let duration = music?.cutDuration(at: cursor, available: sourceRange.duration) ?? sourceRange.duration
-            let range = CMTimeRange(start: sourceRange.start, duration: duration)
+            let beatDuration = music?.cutDuration(at: cursor, available: sourceRange.duration)
+            let range = CMTimeRange(start: sourceRange.start, duration: beatDuration ?? sourceRange.duration)
+            let trimSilence = removeSilences && beatDuration == nil
 
             let size = try await video.load(.naturalSize)
             let orientation = try await video.load(.preferredTransform)
@@ -116,47 +131,72 @@ enum ReelExporter {
                 .concatenating(CGAffineTransform(scaleX: scale, y: scale))
                 .concatenating(CGAffineTransform(translationX: renderSize.width / 2 - bounds.midX * scale,
                                                  y: renderSize.height / 2 - bounds.midY * scale))
-            try compVideoTrack.insertTimeRange(range, of: video, at: cursor)
-
-            var cues: [CaptionCue] = []
-            let audioTracks = try await asset.loadTracks(withMediaType: .audio)
-            if let audio = audioTracks.first {
-                let audioRange = try await audio.load(.timeRange)
-                let overlap = CMTimeRangeGetIntersection(range, otherRange: audioRange)
-                if overlap.duration.isNumeric, overlap.duration > .zero {
-                    guard let compAudioTrack else { throw ExportError.exporterCreationFailed }
-                    let audioStart = cursor + (overlap.start - range.start)
-                    try compAudioTrack.insertTimeRange(overlap, of: audio, at: audioStart)
-                    if music != nil, autoDuckingEnabled {
-                        speech += try BeatSyncEngine.voiceIntervals(in: asset, track: audio, range: overlap,
-                                                                   reelStart: audioStart)
-                    }
-                    if let recognizer {
-                        cues = await CaptionService.cues(for: url, audioTrack: audio, trackStart: audioRange.start,
-                                                         range: overlap, reelStart: audioStart, recognizer: recognizer)
-                    }
+            let audio = try await asset.loadTracks(withMediaType: .audio).first
+            let audioRange = try await audio?.load(.timeRange) ?? .invalid
+            let analysisRange = CMTimeRangeGetIntersection(range, otherRange: audioRange)
+            var voice: [Range<Double>] = []
+            var transcription: CaptionService.Transcription?
+            if let audio, analysisRange.duration.isNumeric, analysisRange.duration > .zero {
+                if trimSilence || duckMusic {
+                    voice = try BeatSyncEngine.voiceIntervals(in: asset, track: audio, range: analysisRange)
+                }
+                if let recognizer {
+                    transcription = await CaptionService.transcribe(url, audioTrack: audio, trackStart: audioRange.start,
+                                                                    range: analysisRange, recognizer: recognizer)
                 }
             }
-            clips.append(ReelInstruction(trackID: compVideoTrack.trackID,
-                                         range: CMTimeRange(start: cursor, duration: range.duration),
-                                         size: size, transform: transform, look: look, cues: cues))
-            cursor = cursor + range.duration
+
+            let segments = trimSilence ? BeatSyncEngine.activeRanges(in: range, voiceIntervals: voice) : [range]
+            var remainingVoice = voice[...]
+            for segment in segments {
+                try Task.checkCancellation()
+                try compVideoTrack.insertTimeRange(segment, of: video, at: cursor)
+                var cues: [CaptionCue] = []
+                let overlap = CMTimeRangeGetIntersection(segment, otherRange: audioRange)
+                if let audio, overlap.duration.isNumeric, overlap.duration > .zero {
+                    guard let compAudioTrack else { throw ExportError.exporterCreationFailed }
+                    let audioStart = cursor + (overlap.start - segment.start)
+                    try compAudioTrack.insertTimeRange(overlap, of: audio, at: audioStart)
+                    if duckMusic {
+                        let offset = (audioStart - overlap.start).seconds
+                        while let interval = remainingVoice.first, interval.lowerBound < overlap.end.seconds {
+                            let start = max(interval.lowerBound, overlap.start.seconds)
+                            let end = min(interval.upperBound, overlap.end.seconds)
+                            if start < end { speech.append((start + offset)..<(end + offset)) }
+                            if interval.upperBound > overlap.end.seconds { break }
+                            remainingVoice = remainingVoice.dropFirst()
+                        }
+                    }
+                    cues = transcription?.cues(in: overlap, at: audioStart) ?? []
+                }
+                clips.append(ReelInstruction(trackID: compVideoTrack.trackID,
+                                             range: CMTimeRange(start: cursor, duration: segment.duration),
+                                             size: size, transform: transform, look: look, cues: cues,
+                                             transition: transition, lut: lut))
+                cursor = cursor + segment.duration
+            }
         }
 
         try Task.checkCancellation()
 
+        let transitionCutTimes = clips.dropFirst().map { $0.timeRange.start }
+        if transition != .cut {
+            for (index, time) in transitionCutTimes.enumerated() {
+                clips[index].outgoingCut = time.seconds
+                clips[index + 1].incomingCut = time.seconds
+            }
+        }
         // Composition segments refer back to this WAV until the export finishes.
-        let whooshURL = includeSoundDesign && clips.count > 1 ? createCinematicWhooshAudioFile() : nil
+        let whooshURL = includeSoundDesign && !transitionCutTimes.isEmpty ? createCinematicWhooshAudioFile() : nil
         defer { if let whooshURL { try? FileManager.default.removeItem(at: whooshURL) } }
         if let whooshURL {
-            let cuts = clips.dropFirst().map { $0.timeRange.start }
-            try await insertWhooshes(from: whooshURL, at: cuts, in: composition, end: cursor)
+            try await insertWhooshes(from: whooshURL, at: transitionCutTimes, in: composition, end: cursor)
         }
 
         let outputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("FramePilot-Reel-\(UUID().uuidString).mov")
         defer { try? FileManager.default.removeItem(at: outputURL) }
-        let needsEffects = look != .original || clips.contains { !$0.cues.isEmpty }
+        let needsEffects = look != .original || lut != nil || clips.contains { $0.containsTweening }
         let videoComposition: AVVideoComposition?
         if let sharedPortraitTransform, !needsEffects {
             // Uniform portrait footage can keep its native dimensions and cadence.
@@ -209,9 +249,9 @@ enum ReelExporter {
             beats = detectBeats ? try BeatSyncEngine.beats(in: asset, track: track, range: analysisRange) : []
         }
 
-        func cutDuration(at start: CMTime, available: CMTime) -> CMTime {
+        func cutDuration(at start: CMTime, available: CMTime) -> CMTime? {
             let minimum = CMTime(value: 4, timescale: 5)
-            guard available >= minimum, let lastBeat = beats.last else { return available }
+            guard available >= minimum, let lastBeat = beats.last else { return nil }
             let end = (start + available).seconds
             let period = range.duration.seconds
             let cycleStart = floor(end / period) * period
@@ -219,7 +259,7 @@ enum ReelExporter {
             let beat = beats.last(where: { $0 <= end - cycleStart }).map { cycleStart + $0 }
                 ?? (cycleStart - period + lastBeat)
             let length = CMTime(seconds: beat, preferredTimescale: 48_000) - start
-            return length >= minimum && length <= available ? length : available
+            return length >= minimum && length <= available ? length : nil
         }
 
         func insert(in composition: AVMutableComposition, end: CMTime,
@@ -332,11 +372,17 @@ enum ReelExporter {
         else { return }
         let range = try await source.load(.timeRange)
         let lead = CMTime(seconds: 0.26, preferredTimescale: 44100)
+        func midpoint(after index: Int) -> CMTime {
+            let earlier = cuts[index]
+            return earlier + CMTimeMultiplyByRatio(cuts[index + 1] - earlier, multiplier: 1, divisor: 2)
+        }
         for (index, cut) in cuts.enumerated() {
             let intendedStart = cut - lead
-            let start = max(.zero, intendedStart)
-            let nextStart = index + 1 < cuts.count ? max(.zero, cuts[index + 1] - lead) : end
-            let stop = min(intendedStart + range.duration, nextStart, end)
+            // Split overlapping whooshes between cuts to keep both peaks in place.
+            let previousBoundary = index > 0 ? midpoint(after: index - 1) : .zero
+            let nextBoundary = index + 1 < cuts.count ? midpoint(after: index) : end
+            let start = max(previousBoundary, intendedStart)
+            let stop = min(intendedStart + range.duration, nextBoundary)
             if start < stop {
                 let slice = CMTimeRange(start: range.start + (start - intendedStart), duration: stop - start)
                 try track.insertTimeRange(slice, of: source, at: start)
@@ -408,30 +454,16 @@ enum ReelExporter {
         case .original:
             return image
         case .film35mm:
-            // 35mm Analog Film emulation: warm highlight roll-off, lifted rich blacks, subtle soft-light grain
+            // Warm highlights and lifted blacks.
             let warmed = image.applyingFilter("CITemperatureAndTint", parameters: [
                 "inputNeutral": CIVector(x: 6500, y: 0),
                 "inputTargetNeutral": CIVector(x: 5800, y: 5)
             ])
-            let filmCurve = warmed.applyingFilter("CIColorControls", parameters: [
+            return warmed.applyingFilter("CIColorControls", parameters: [
                 kCIInputSaturationKey: 1.06,
                 kCIInputContrastKey: 1.11,
                 kCIInputBrightnessKey: 0.02
             ])
-            // Subtle analog grain via random generator
-            if let noise = CIFilter(name: "CIRandomGenerator")?.outputImage?
-                .cropped(to: image.extent)
-                .applyingFilter("CIColorMatrix", parameters: [
-                    "inputRVector": CIVector(x: 0.33, y: 0.33, z: 0.33, w: 0),
-                    "inputGVector": CIVector(x: 0.33, y: 0.33, z: 0.33, w: 0),
-                    "inputBVector": CIVector(x: 0.33, y: 0.33, z: 0.33, w: 0),
-                    "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0.065)
-                ]) {
-                return noise.applyingFilter("CISoftLightBlendMode", parameters: [
-                    kCIInputBackgroundImageKey: filmCurve
-                ])
-            }
-            return filmCurve
         case .cinemaWarm:
             // Warm highlights + subtle film contrast
             let warmed = image.applyingFilter("CITemperatureAndTint", parameters: [
@@ -462,6 +494,44 @@ enum ReelExporter {
         }
     }
 
+    fileprivate static func applyFilmGrain(to image: CIImage) -> CIImage {
+        guard let noise = CIFilter(name: "CIRandomGenerator")?.outputImage else { return image }
+        return noise.cropped(to: image.extent)
+            .applyingFilter("CIColorMatrix", parameters: [
+                "inputRVector": CIVector(x: 0.33, y: 0.33, z: 0.33, w: 0),
+                "inputGVector": CIVector(x: 0.33, y: 0.33, z: 0.33, w: 0),
+                "inputBVector": CIVector(x: 0.33, y: 0.33, z: 0.33, w: 0),
+                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0.065)
+            ])
+            .applyingFilter("CISoftLightBlendMode", parameters: [kCIInputBackgroundImageKey: image])
+    }
+
+    fileprivate static func applyTransition(_ transition: ReelTransition, to image: CIImage, in frame: CGRect,
+                                            distanceToCut: Double) -> CIImage {
+        let progress = max(0, 1 - distanceToCut / 0.12)
+        guard progress > 0 else { return image }
+        let strength = CGFloat(progress * progress * (3 - 2 * progress))
+        switch transition {
+        case .cut:
+            return image
+        case .zoomPunch:
+            let scale = 1 + 0.12 * strength
+            let zoom = CGAffineTransform(a: scale, b: 0, c: 0, d: scale,
+                                         tx: frame.midX * (1 - scale), ty: frame.midY * (1 - scale))
+            return image.transformed(by: zoom).cropped(to: frame)
+        case .whipBlur:
+            return image.clamped(to: frame).applyingFilter("CIMotionBlur", parameters: [
+                kCIInputRadiusKey: frame.width * 0.065 * strength * strength,
+                kCIInputAngleKey: 0
+            ]).cropped(to: frame)
+        case .filmFlash:
+            let flash = strength * strength
+            let exposed = image.applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: 0.85 * flash])
+            let tint = CIColor(red: 1, green: 0.88, blue: 0.68, alpha: 0.36 * flash)
+            return CIImage(color: tint).cropped(to: frame).composited(over: exposed)
+        }
+    }
+
     private static func saveVideoToPhotos(url: URL) async throws {
         let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
         guard status == .authorized || status == .limited else {
@@ -489,19 +559,25 @@ private final class ReelInstruction: NSObject, AVVideoCompositionInstructionProt
     let transform: CGAffineTransform
     let look: ReelLook
     let cues: [CaptionCue]
+    let transition: ReelTransition
+    let lut: CubeLUTLoader?
+    var incomingCut: Double?
+    var outgoingCut: Double?
     let enablePostProcessing = false
-    var containsTweening: Bool { !cues.isEmpty }
+    var containsTweening: Bool { !cues.isEmpty || incomingCut != nil || outgoingCut != nil }
     let passthroughTrackID = kCMPersistentTrackID_Invalid
     var requiredSourceTrackIDs: [NSValue]? { [NSNumber(value: trackID)] }
 
     init(trackID: CMPersistentTrackID, range: CMTimeRange, size: CGSize, transform: CGAffineTransform,
-         look: ReelLook, cues: [CaptionCue]) {
+         look: ReelLook, cues: [CaptionCue], transition: ReelTransition, lut: CubeLUTLoader?) {
         self.trackID = trackID
         self.timeRange = range
         self.size = size
         self.transform = transform
         self.look = look
         self.cues = cues
+        self.transition = transition
+        self.lut = lut
     }
 
     func cue(at time: Double) -> CaptionCue? {
@@ -559,8 +635,15 @@ private final class ReelCompositor: NSObject, AVVideoCompositing {
                 .concatenating(CGAffineTransform(translationX: 0, y: clip.size.height))
             let toCI = CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: 0, ty: frame.height)
             let positioned = image.transformed(by: toTrack.concatenating(clip.transform).concatenating(toCI))
-            var result = ReelExporter.applyLook(clip.look, to: positioned.cropped(to: frame)).cropped(to: frame)
             let time = request.compositionTime.seconds
+            let graded = ReelExporter.applyLook(clip.look, to: positioned.cropped(to: frame)).cropped(to: frame)
+            let distance = min(abs(time - (clip.incomingCut ?? -.infinity)),
+                               abs(time - (clip.outgoingCut ?? .infinity)))
+            var result = ReelExporter.applyTransition(clip.transition, to: clip.lut?.apply(to: graded) ?? graded,
+                                                      in: frame, distanceToCut: distance)
+            if clip.look == .film35mm {
+                result = ReelExporter.applyFilmGrain(to: result)
+            }
             if let cue = clip.cue(at: time), let badge = badge(for: cue) {
                 let progress = min(1, max(0, (time - cue.start) / 0.10))
                 let scale = CGFloat(0.94 + 0.06 * progress)

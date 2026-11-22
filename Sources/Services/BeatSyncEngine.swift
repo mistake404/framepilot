@@ -55,9 +55,8 @@ enum BeatSyncEngine {
         return beats
     }
 
-    /// RMS activity in the inserted audio slice, expressed on the Reel timeline.
-    static func voiceIntervals(in asset: AVAsset, track: AVAssetTrack, range: CMTimeRange,
-                               reelStart: CMTime) throws -> [Range<Double>] {
+    /// RMS activity in the supplied audio slice, expressed in source seconds.
+    static func voiceIntervals(in asset: AVAsset, track: AVAssetTrack, range: CMTimeRange) throws -> [Range<Double>] {
         var intervals: [Range<Double>] = []
         var noiseFloor = -58.0
         var start: Double?
@@ -66,7 +65,7 @@ enum BeatSyncEngine {
 
         func finish() {
             if let start, voicedDuration >= 0.055 {
-                intervals.append((reelStart.seconds + start)..<(reelStart.seconds + lastEnd))
+                intervals.append((range.start.seconds + start)..<(range.start.seconds + lastEnd))
             }
             start = nil
             voicedDuration = 0
@@ -89,6 +88,30 @@ enum BeatSyncEngine {
         }
         finish()
         return intervals
+    }
+
+    static func activeRanges(in clip: CMTimeRange, voiceIntervals: [Range<Double>]) -> [CMTimeRange] {
+        guard let first = voiceIntervals.first else { return [clip] }
+
+        // Keep a pause of exactly 0.45 s despite floating-point time conversions.
+        let maximumPause = 0.45 + 1e-9
+        let padding = 0.12
+        var start = first.lowerBound - clip.start.seconds > maximumPause
+            ? CMTime(seconds: first.lowerBound - padding, preferredTimescale: 48_000) : clip.start
+        var end = first.upperBound
+        var ranges: [CMTimeRange] = []
+        for voice in voiceIntervals.dropFirst() {
+            if voice.lowerBound - end > maximumPause {
+                let stop = CMTime(seconds: end + padding, preferredTimescale: 48_000)
+                ranges.append(CMTimeRange(start: start, end: stop))
+                start = CMTime(seconds: voice.lowerBound - padding, preferredTimescale: 48_000)
+            }
+            end = voice.upperBound
+        }
+        let stop = clip.end.seconds - end > maximumPause
+            ? CMTime(seconds: end + padding, preferredTimescale: 48_000) : clip.end
+        ranges.append(CMTimeRange(start: start, end: stop))
+        return ranges
     }
 
     /// Decode directly into fixed-size analysis windows, including windows spanning PCM buffers.
