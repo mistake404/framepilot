@@ -161,6 +161,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
 
     private var videoDevice: AVCaptureDevice?
     private var videoInput: AVCaptureDeviceInput?
+    private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
     private var wideZoomFactor: Double = 1.0
     private var pinchLensRange = 1.0...1.0
     private var pinchStartLens: Double = 1.0
@@ -614,9 +615,16 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
             showToast("Saída de captura indisponível")
             return false
         }
+        if switched || rotationCoordinator == nil {
+            rotationCoordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: nil)
+        }
         if connection.isVideoMirroringSupported {
             connection.automaticallyAdjustsVideoMirroring = false
-            connection.isVideoMirrored = !back
+            connection.isVideoMirrored = false
+        }
+        let initialAngle = rotationCoordinator?.videoRotationAngleForHorizonLevelCapture ?? 90
+        if connection.isVideoRotationAngleSupported(initialAngle) {
+            connection.videoRotationAngle = initialAngle
         }
         if photos {
             photoOutput.maxPhotoQualityPrioritization = .quality
@@ -1531,7 +1539,6 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         shutterFlashVisible = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in self?.shutterFlashVisible = false }
         let flash = flashOption.avFlashMode
-        let angle = currentVideoRotationAngle()
         sessionQueue.async {
             guard self.isConfigured, self.runningRequested, self.captureSession.isRunning, !self.captureSession.isInterrupted,
                   !self.photoInFlight, !self.movieInFlight, self.requestedMode == .photo,
@@ -1548,6 +1555,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
             settings.photoQualityPrioritization = .quality
             settings.maxPhotoDimensions = self.photoOutput.maxPhotoDimensions
             if self.photoOutput.supportedFlashModes.contains(flash) { settings.flashMode = flash }
+            let angle = self.rotationCoordinator?.videoRotationAngleForHorizonLevelCapture ?? 90
             if conn.isVideoRotationAngleSupported(angle) { conn.videoRotationAngle = angle }
             self.photoInFlight = true
             self.processedPhotoData = nil
@@ -1565,7 +1573,6 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         recordingSeconds = 0
         recordingElapsed = 0
         isRecording = true
-        let angle = currentVideoRotationAngle()
         sessionQueue.async {
             guard self.isConfigured, self.runningRequested, self.captureSession.isRunning, !self.captureSession.isInterrupted,
                   !self.movieInFlight, !self.photoInFlight, self.requestedMode == .video,
@@ -1573,6 +1580,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
                 self.captureFailed("Câmara indisponível para gravação")
                 return
             }
+            let angle = self.rotationCoordinator?.videoRotationAngleForHorizonLevelCapture ?? 90
             if conn.isVideoRotationAngleSupported(angle) { conn.videoRotationAngle = angle }
             self.movieInFlight = true
             self.stopMovieRequested = false
