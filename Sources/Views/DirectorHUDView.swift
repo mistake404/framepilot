@@ -37,6 +37,13 @@ struct DirectorHUDView: View {
                     isGoodFraming: faceRect.minY >= 0.08 && faceRect.midY <= 0.68
                 )
                 .allowsHitTesting(false)
+            } else if let subjectRect = telemetry.detectedSubjectRect {
+                SubjectTrackerOverlay(
+                    normalizedRect: subjectRect,
+                    isGoodFraming: subjectRect.minX >= 0.04 && subjectRect.maxX <= 0.96 &&
+                        subjectRect.minY >= 0.05 && subjectRect.maxY <= 0.86
+                )
+                .allowsHitTesting(false)
             }
 
             // Holographic 3D Virtual Dolly Rail
@@ -58,6 +65,19 @@ struct DirectorHUDView: View {
                 isHorizonLevel: telemetry.isHorizonLevel
             )
             .allowsHitTesting(false)
+
+            // Live Audio VU Meter (left edge, video mode)
+            if telemetry.hasAudioMonitor {
+                HStack {
+                    AudioMeterOverlay(
+                        level: telemetry.audioLevel,
+                        isClipping: telemetry.isAudioClipping
+                    )
+                    .padding(.leading, 10)
+                    Spacer()
+                }
+                .allowsHitTesting(false)
+            }
 
             // Live Vertical Pitch Gauge (Picado / Contrapicado visual guide)
             if let shot = activeShot {
@@ -82,6 +102,31 @@ struct DirectorHUDView: View {
                     telemetry: telemetry
                 )
                 .padding(.horizontal, 16)
+
+                if isRecording, let progress = telemetry.recordingProgress, !telemetry.isDollyActive {
+                    RecordingPaceBar(
+                        movementHint: activeShot?.movementHint ?? "Ritmo constante",
+                        elapsed: telemetry.recordingElapsed,
+                        target: telemetry.recordingTargetSeconds,
+                        progress: progress,
+                        pace: telemetry.motionPace
+                    )
+                    .padding(.horizontal, 28)
+                }
+
+                if telemetry.isAudioClipping {
+                    DirectorAlertPill(
+                        icon: "exclamationmark.triangle.fill",
+                        text: "Áudio a saturar — afasta o microfone",
+                        tint: .red
+                    )
+                } else if let continuity = telemetry.continuityAlert {
+                    DirectorAlertPill(
+                        icon: continuity.suggestLockWhiteBalance ? "thermometer.medium" : "sun.max.trianglebadge.exclamationmark",
+                        text: continuity.message,
+                        tint: .orange
+                    )
+                }
 
                 if isRecording || telemetry.motionPace != .still {
                     MotionPacePill(
@@ -618,5 +663,130 @@ private struct PitchGaugeOverlay: View {
                 .padding(.vertical, 2)
                 .background(Capsule().fill(Color.black.opacity(0.62)))
         }
+    }
+}
+
+private struct SubjectTrackerOverlay: View {
+    let normalizedRect: CGRect
+    let isGoodFraming: Bool
+
+    var body: some View {
+        GeometryReader { geo in
+            let rect = CGRect(
+                x: normalizedRect.minX * geo.size.width,
+                y: normalizedRect.minY * geo.size.height,
+                width: normalizedRect.width * geo.size.width,
+                height: normalizedRect.height * geo.size.height
+            )
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(
+                    (isGoodFraming ? Color.cyan : Color.orange).opacity(0.65),
+                    style: StrokeStyle(lineWidth: 1.4, dash: [7, 5])
+                )
+                .frame(width: max(28, rect.width), height: max(28, rect.height))
+                .position(x: rect.midX, y: rect.midY)
+        }
+        .ignoresSafeArea()
+    }
+}
+
+private struct AudioMeterOverlay: View {
+    let level: Float
+    let isClipping: Bool
+    private let barHeight: CGFloat = 110
+
+    var body: some View {
+        let clamped = CGFloat(max(0, min(1, level)))
+        let fillHeight = max(3, barHeight * clamped)
+        let color: Color = isClipping ? .red : (clamped > 0.78 ? .yellow : .green)
+
+        VStack(spacing: 4) {
+            Image(systemName: isClipping ? "mic.slash.fill" : "mic.fill")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(isClipping ? .red : .white.opacity(0.85))
+
+            ZStack(alignment: .bottom) {
+                Capsule()
+                    .fill(Color.black.opacity(0.55))
+                    .frame(width: 7, height: barHeight)
+                    .overlay(
+                        Capsule().stroke(Color.white.opacity(0.18), lineWidth: 0.8)
+                    )
+
+                Capsule()
+                    .fill(color)
+                    .frame(width: 7, height: fillHeight)
+            }
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 4)
+        .background(Capsule().fill(Color.black.opacity(0.38)))
+    }
+}
+
+private struct RecordingPaceBar: View {
+    let movementHint: String
+    let elapsed: Double
+    let target: Double
+    let progress: Double
+    let pace: MotionPace
+
+    private var reachedTarget: Bool {
+        progress >= 1.0
+    }
+
+    var body: some View {
+        VStack(spacing: 4) {
+            HStack {
+                Text(movementHint)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.92))
+                    .lineLimit(1)
+                Spacer()
+                Text(String(format: "%.1fs / %.1fs", elapsed, target))
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundColor(reachedTarget ? .green : .yellow)
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.2))
+                    Capsule()
+                        .fill(pace == .tooFast ? Color.red : (reachedTarget ? Color.green : Color.yellow))
+                        .frame(width: max(4, geo.size.width * CGFloat(max(0, min(1, progress)))))
+                }
+            }
+            .frame(height: 4)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.black.opacity(0.68))
+        )
+    }
+}
+
+private struct DirectorAlertPill: View {
+    let icon: String
+    let text: String
+    let tint: Color
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(tint)
+            Text(text)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.white)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 11)
+        .padding(.vertical, 5)
+        .background(
+            Capsule()
+                .fill(Color.black.opacity(0.75))
+                .overlay(Capsule().stroke(tint.opacity(0.7), lineWidth: 1))
+        )
     }
 }

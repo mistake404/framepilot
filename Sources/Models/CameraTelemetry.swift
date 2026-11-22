@@ -105,6 +105,15 @@ struct CameraTelemetry {
     var lighting: LightingCondition = .balanced
     var motionPace: MotionPace = .still
     var detectedFaceRect: CGRect? // normalized top-left 0...1
+    var detectedSubjectRect: CGRect? // saliency subject rect (normalized top-left 0...1)
+    var isBacklit: Bool = false
+    var audioLevel: Float = 0.0 // 0.0 ... 1.0
+    var isAudioClipping: Bool = false
+    var hasAudioMonitor: Bool = false
+    var continuityAlert: ContinuityAlert?
+    var recordingProgress: Double? // 0.0 ... 1.0 during paced video takes
+    var recordingElapsed: Double = 0
+    var recordingTargetSeconds: Double = 0
     var advice: CoachingAdvice = .idle
     var focusMarkA: FocusMark?
     var focusMarkB: FocusMark?

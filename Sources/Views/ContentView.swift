@@ -119,6 +119,17 @@ struct ContentView: View {
 
                 Spacer()
 
+                if let verdict = engine.latestTakeVerdict {
+                    TakeVerdictCard(
+                        verdict: verdict,
+                        onRetake: { engine.retakeShot(id: verdict.shotId) },
+                        onDismiss: { engine.dismissTakeVerdict() }
+                    )
+                    .padding(.horizontal, 18)
+                    .padding(.bottom, 8)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+
                 if let toast = engine.statusToast {
                     Text(toast)
                         .font(.system(size: 13, weight: .semibold))
@@ -902,6 +913,66 @@ private struct ProDrawerTile: View {
                 .overlay(
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .stroke(isActive ? accentColor.opacity(0.55) : Color.white.opacity(0.08), lineWidth: 1)
+                )
+        )
+    }
+}
+
+private struct TakeVerdictCard: View {
+    let verdict: TakeVerdict
+    let onRetake: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        let accent: Color = verdict.isApproved ? .green : .orange
+
+        HStack(spacing: 10) {
+            Image(systemName: verdict.isApproved ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                .font(.system(size: 18, weight: .bold))
+                .foregroundColor(accent)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(verdict.headline)
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(.white)
+                Text(verdict.detail)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.white.opacity(0.8))
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 4)
+
+            if verdict.canRetake {
+                Button("Repetir") {
+                    onRetake()
+                }
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(.black)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(Color.yellow))
+            }
+
+            Button {
+                onDismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(.white.opacity(0.8))
+                    .frame(width: 26, height: 26)
+                    .background(Circle().fill(Color.white.opacity(0.14)))
+            }
+            .accessibilityLabel("Fechar avaliação do take")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.black.opacity(0.82))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(accent.opacity(0.65), lineWidth: 1.2)
                 )
         )
     }

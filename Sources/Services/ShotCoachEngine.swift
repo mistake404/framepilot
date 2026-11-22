@@ -35,6 +35,8 @@ enum ShotCoachEngine {
         lighting: LightingCondition,
         motionPace: MotionPace,
         detectedFaceRect: CGRect?,
+        detectedSubjectRect: CGRect? = nil,
+        isBacklit: Bool = false,
         isRecording: Bool,
         wasLocked: Bool = false,
         target: ShotTemplate?
@@ -45,6 +47,16 @@ enum ShotCoachEngine {
                 primaryInstruction: "Abranda o movimento da câmara",
                 secondaryHint: "Mantém a rotação suave para um resultado cinematográfico.",
                 alignmentScore: 0.45,
+                isLocked: false
+            )
+        }
+
+        // Backlight guard before recording
+        if !isRecording && isBacklit {
+            return CoachingAdvice(
+                primaryInstruction: "Contraluz forte — roda 45° para a luz",
+                secondaryHint: "Ou sobe a exposição (+0,7 EV) para iluminar o sujeito.",
+                alignmentScore: 0.58,
                 isLocked: false
             )
         }
@@ -64,6 +76,15 @@ enum ShotCoachEngine {
                     primaryInstruction: "Sobe o rosto para o terço superior",
                     secondaryHint: "Evita a zona inferior de legendas no Reels/TikTok.",
                     alignmentScore: 0.68,
+                    isLocked: false
+                )
+            }
+        } else if !isRecording, let subject = detectedSubjectRect {
+            if subject.minX < 0.04 || subject.maxX > 0.96 || subject.minY < 0.05 || subject.maxY > 0.86 {
+                return CoachingAdvice(
+                    primaryInstruction: "Dá margem ao sujeito principal",
+                    secondaryHint: "Afasta ligeiramente ou alinha com a regra dos terços.",
+                    alignmentScore: 0.66,
                     isLocked: false
                 )
             }

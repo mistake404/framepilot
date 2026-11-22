@@ -83,6 +83,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     let hudStore = HUDTelemetryStore()
     let highlights = HighlightRegions()
     let focusLoupe = FocusLoupe()
+    @Published private(set) var latestTakeVerdict: TakeVerdict?
     @Published private(set) var digitalLensPresets: Set<Double> = []
     @Published private(set) var whiteBalanceLocked = false
     @Published private(set) var canLockWhiteBalance = false
@@ -189,6 +190,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
 
     // Accessed only on visionQueue.
     private let faceRequest = VNDetectFaceRectanglesRequest()
+    private let saliencyRequest = VNGenerateAttentionBasedSaliencyImageRequest()
 
     private var videoDevice: AVCaptureDevice?
     private var videoInput: AVCaptureDeviceInput?
@@ -222,6 +224,8 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     private var smoothedMotionSpeed: Double = 0
     private var smoothedDistanceMeters: Double?
     private var latestFaceRect: CGRect?
+    private var latestSubjectRect: CGRect?
+    private var latestIsBacklit: Bool = false
     private var hasMotionSample: Bool = false
     private var motionGeneration: UInt = 0
     private var isRecordingFlag: Bool = false
@@ -234,6 +238,10 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     private var cachedAdvice: CoachingAdvice = .idle
     private var cachedDetectedShot: ShotKind = .medium
     private var wasLocked: Bool = false
+    private var continuityReference: SceneContinuityReference?
+    private let takeMetrics = TakeMetricsTracker()
+    private var verdictDismissTask: DispatchWorkItem?
+    private var lastAudioClipHoldTime: CFTimeInterval = 0
 
     private var hudTimer: DispatchSourceTimer?
     private var recordingTimer: Timer?
@@ -762,6 +770,8 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         visionConnection = nil
         smoothedDistanceMeters = nil
         latestFaceRect = nil
+        latestSubjectRect = nil
+        latestIsBacklit = false
         latestHighlights = []
         sensorLock.unlock()
     }
@@ -795,7 +805,11 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         depthConnection = enableDepth ? depth : nil
         visionConnection = enableVision ? vision : nil
         if !enableDepth { smoothedDistanceMeters = nil }
-        if !enableVision { latestFaceRect = nil }
+        if !enableVision {
+            latestFaceRect = nil
+            latestSubjectRect = nil
+            latestIsBacklit = false
+        }
         latestHighlights = []
         sensorLock.unlock()
         let settings: [String: Any]? = videoDataOutput.videoSettings
@@ -1110,6 +1124,8 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         activeShotIndex = 0
         completedShotIds.removeAll()
         sessionTakes.removeAll()
+        continuityReference = nil
+        dismissTakeVerdict()
         if let first = pack.shots.first {
             setCaptureMode(first.preferredMode)
             selectAutomaticZoom(first.recommendedLens)
@@ -1566,6 +1582,8 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         let distance = smoothedDistanceMeters
         let highlightRects = latestHighlights
         let faceRect = latestFaceRect
+        let subjectRect = latestSubjectRect
+        let isBacklit = latestIsBacklit
         let thermal = currentThermalState
         sensorLock.unlock()
 
@@ -1574,8 +1592,34 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         let iso = Double(hudDevice?.iso ?? 200)
         let lighting: LightingCondition = iso > 900 ? .low : (iso < 60 ? .bright : .balanced)
 
-        let adviceInterval = (thermal == .serious || thermal == .critical) ? 0.30 : 0.15
         let now = CACurrentMediaTime()
+        var audioLevel: Float = 0
+        var isAudioClipping = false
+        var hasAudioMonitor = false
+        if captureMode == .video,
+           let channel = movieOutput.connection(with: .audio)?.audioChannels.first {
+            hasAudioMonitor = true
+            let avg = channel.averagePowerLevel
+            let peak = channel.peakHoldLevel
+            if avg.isFinite {
+                audioLevel = max(0, min(1, (avg + 55.0) / 55.0))
+            }
+            if peak.isFinite && peak >= -1.0 {
+                lastAudioClipHoldTime = now + 0.65
+            }
+            isAudioClipping = now < lastAudioClipHoldTime
+        }
+
+        if isRecording {
+            takeMetrics.recordSample(
+                pace: motionPace,
+                isAudioClipping: isAudioClipping,
+                isBacklit: isBacklit,
+                highlightCount: highlightRects.count
+            )
+        }
+
+        let adviceInterval = (thermal == .serious || thermal == .critical) ? 0.30 : 0.15
         if now - lastAdviceUpdate >= adviceInterval {
             lastAdviceUpdate = now
             cachedDetectedShot = ShotCoachEngine.detectShotKind(distanceMeters: distance, pitchDegrees: pitch)
@@ -1586,10 +1630,24 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
                 lighting: lighting,
                 motionPace: motionPace,
                 detectedFaceRect: faceRect,
+                detectedSubjectRect: subjectRect,
+                isBacklit: isBacklit,
                 isRecording: isRecording,
                 wasLocked: wasLocked,
                 target: currentTargetShot
             )
+        }
+
+        let continuityAlert: ContinuityAlert?
+        if !isRecording, let device = hudDevice, let ref = continuityReference {
+            continuityAlert = SceneDirectorAnalyzer.continuityAlert(
+                currentKelvin: SceneDirectorAnalyzer.safeKelvin(for: device),
+                currentEV: SceneDirectorAnalyzer.relativeEV(for: device),
+                whiteBalanceLocked: whiteBalanceLocked,
+                reference: ref
+            )
+        } else {
+            continuityAlert = nil
         }
 
         let advice = cachedAdvice
@@ -1604,6 +1662,21 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         next.lighting = lighting
         next.detectedShotKind = detected
         next.detectedFaceRect = faceRect
+        next.detectedSubjectRect = faceRect == nil ? subjectRect : nil
+        next.isBacklit = isBacklit
+        next.audioLevel = audioLevel
+        next.isAudioClipping = isAudioClipping
+        next.hasAudioMonitor = hasAudioMonitor
+        next.continuityAlert = continuityAlert
+        if isRecording, let targetSec = self.activeShot?.targetDurationSeconds, targetSec.isFinite, targetSec > 0 {
+            next.recordingElapsed = self.recordingElapsed
+            next.recordingTargetSeconds = targetSec
+            next.recordingProgress = min(1.0, self.recordingElapsed / targetSec)
+        } else {
+            next.recordingElapsed = 0
+            next.recordingTargetSeconds = 0
+            next.recordingProgress = nil
+        }
         next.advice = advice
         next.focusMarkA = self.focusMarkA
         next.focusMarkB = self.focusMarkB
@@ -1747,6 +1820,8 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         recordingTarget = activeShot?.targetDurationSeconds
         autoStopRecording = autoStopEnabled
         didHitTargetDurationHaptic = false
+        takeMetrics.reset()
+        dismissTakeVerdict()
         recordingSeconds = 0
         recordingElapsed = 0
         isRecording = true
@@ -1916,13 +1991,67 @@ extension SpatialCameraEngine: AVCaptureFileOutputRecordingDelegate {
                 let seconds = duration.isFinite ? max(0, duration) : fallbackDuration
                 let preview = await Self.extractLastVideoFrame(asset: asset, seconds: seconds)
                 await MainActor.run {
+                    let shotContext = self.captureContext
+                    let targetDuration = self.recordingTarget ?? 0
+                    let canRetake = shotContext.map { ctx in
+                        ctx.generation == self.packGeneration && self.selectedPack.shots.contains { $0.id == ctx.id }
+                    } ?? false
+                    if let device = self.hudDevice,
+                       let kelvin = SceneDirectorAnalyzer.safeKelvin(for: device),
+                       let ev = SceneDirectorAnalyzer.relativeEV(for: device) {
+                        self.continuityReference = SceneContinuityReference(
+                            shotTitle: shotContext?.title ?? "Plano anterior",
+                            kelvin: kelvin,
+                            relativeEV: ev
+                        )
+                    }
+                    let verdict = self.takeMetrics.evaluate(
+                        shotId: shotContext?.id ?? "",
+                        shotTitle: shotContext?.title ?? "Plano Livre",
+                        durationSeconds: seconds,
+                        targetSeconds: targetDuration,
+                        canRetake: canRetake
+                    )
                     self.storeTake(preview: preview, url: outputFileURL, duration: seconds)
                     self.saveCapture {
                         _ = PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: outputFileURL)
                     }
+                    self.presentTakeVerdict(verdict)
                 }
             }
         }
+    }
+
+    func dismissTakeVerdict() {
+        verdictDismissTask?.cancel()
+        verdictDismissTask = nil
+        latestTakeVerdict = nil
+    }
+
+    func retakeShot(id: String) {
+        dismissTakeVerdict()
+        guard !captureBusy, let index = selectedPack.shots.firstIndex(where: { $0.id == id }) else { return }
+        completedShotIds.remove(id)
+        if let oldURL = sessionTakes[id]?.fileURL {
+            cancelCaptionPreparation()
+            editedTranscriptions.removeValue(forKey: oldURL)
+            try? FileManager.default.removeItem(at: oldURL)
+        }
+        sessionTakes.removeValue(forKey: id)
+        selectShot(at: index)
+        showToast("Pronto para repetir «\(selectedPack.shots[index].title)»")
+    }
+
+    private func presentTakeVerdict(_ verdict: TakeVerdict) {
+        verdictDismissTask?.cancel()
+        latestTakeVerdict = verdict
+        let work = DispatchWorkItem { [weak self] in
+            if self?.latestTakeVerdict?.id == verdict.id {
+                self?.latestTakeVerdict = nil
+            }
+        }
+        verdictDismissTask = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5.5, execute: work)
     }
 
     private func storeTake(preview: UIImage?, url: URL?, duration: Double) {
@@ -2108,19 +2237,39 @@ extension SpatialCameraEngine: AVCaptureVideoDataOutputSampleBufferDelegate {
         )
 
         do {
-            try handler.perform([faceRequest])
-            sensorLock.lock()
-            defer { sensorLock.unlock() }
-            guard generation == analysisGeneration, visionConnection === connection else { return }
+            let runSaliency = !recording && thermal == .nominal
+            if runSaliency {
+                try handler.perform([faceRequest, saliencyRequest])
+            } else {
+                try handler.perform([faceRequest])
+            }
+            let faceConverted: CGRect?
             if let face = (faceRequest.results ?? []).max(by: {
                 ($0.boundingBox.width * $0.boundingBox.height) < ($1.boundingBox.width * $1.boundingBox.height)
             }) {
                 let b = face.boundingBox
-                let converted = CGRect(x: b.minX, y: 1.0 - b.maxY, width: b.width, height: b.height)
-                latestFaceRect = converted
+                faceConverted = CGRect(x: b.minX, y: 1.0 - b.maxY, width: b.width, height: b.height)
             } else {
-                latestFaceRect = nil
+                faceConverted = nil
             }
+            let subjectConverted: CGRect?
+            if runSaliency, faceConverted == nil,
+               let box = saliencyRequest.results?.first?.salientObjects?.first?.boundingBox,
+               box.width > 0.05, box.height > 0.05 {
+                subjectConverted = CGRect(x: box.minX, y: 1.0 - box.maxY, width: box.width, height: box.height)
+            } else {
+                subjectConverted = nil
+            }
+            let backlit = SceneDirectorAnalyzer.isBacklit(
+                buffer: pixelBuffer,
+                subjectRectTopLeft: faceConverted ?? subjectConverted
+            )
+            sensorLock.lock()
+            defer { sensorLock.unlock() }
+            guard generation == analysisGeneration, visionConnection === connection else { return }
+            latestFaceRect = faceConverted
+            latestSubjectRect = subjectConverted
+            latestIsBacklit = backlit
         } catch {}
     }
 }
