@@ -96,8 +96,10 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     @Published var showGhostOverlay: Bool = false
     @Published var availableLenses: [Double] = [1.0]
     @Published var activeLens: Double = 1.0
+    @Published var cameraPosition: AVCaptureDevice.Position = .back
     @Published var exposureBias: Float = 0.0
     @Published var focusIndicatorPoint: CGPoint?
+    @Published var isAEAFLocked: Bool = false
 
     private let sessionQueue = DispatchQueue(label: "com.framepilot.session", qos: .userInitiated)
     private let depthQueue = DispatchQueue(label: "com.framepilot.depth", qos: .utility)
@@ -116,6 +118,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     private let faceRequest = VNDetectFaceRectanglesRequest()
 
     private var videoDevice: AVCaptureDevice?
+    private var videoInput: AVCaptureDeviceInput?
     private var wideZoomFactor: Double = 1.0
     private var pinchStartLens: Double = 1.0
     private let photoOutput = AVCapturePhotoOutput()
@@ -311,6 +314,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         }
 
         captureSession.addInput(videoInput)
+        self.videoInput = videoInput
         videoDevice = device
 
         if let audioDevice = AVCaptureDevice.default(for: .audio),
@@ -561,6 +565,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
 
     func focus(at devicePoint: CGPoint, screenPoint: CGPoint) {
         DispatchQueue.main.async {
+            self.isAEAFLocked = false
             self.focusIndicatorPoint = screenPoint
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { [weak self] in
                 if self?.focusIndicatorPoint == screenPoint {
@@ -575,7 +580,9 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
                 try device.lockForConfiguration()
                 if device.isFocusPointOfInterestSupported {
                     device.focusPointOfInterest = devicePoint
-                    if device.isFocusModeSupported(.autoFocus) {
+                    if device.isFocusModeSupported(.continuousAutoFocus) {
+                        device.focusMode = .continuousAutoFocus
+                    } else if device.isFocusModeSupported(.autoFocus) {
                         device.focusMode = .autoFocus
                     }
                 }
@@ -587,6 +594,145 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
                 }
                 device.unlockForConfiguration()
             } catch {}
+        }
+    }
+
+    func lockFocusAndExposure(at devicePoint: CGPoint, screenPoint: CGPoint) {
+        DispatchQueue.main.async {
+            self.isAEAFLocked = true
+            self.focusIndicatorPoint = screenPoint
+            self.impactFeedback.impactOccurred()
+            self.showToast("AE/AF LOCK ativado — toca para destravar")
+        }
+
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.videoDevice else { return }
+            do {
+                try device.lockForConfiguration()
+                if device.isFocusPointOfInterestSupported {
+                    device.focusPointOfInterest = devicePoint
+                }
+                if device.isFocusModeSupported(.locked) {
+                    device.focusMode = .locked
+                }
+                if device.isExposurePointOfInterestSupported {
+                    device.exposurePointOfInterest = devicePoint
+                }
+                if device.isExposureModeSupported(.locked) {
+                    device.exposureMode = .locked
+                }
+                device.unlockForConfiguration()
+            } catch {}
+        }
+    }
+
+    func flipCamera() {
+        guard !isRecording else { return }
+        let targetPosition: AVCaptureDevice.Position = (cameraPosition == .back) ? .front : .back
+
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            let deviceTypes: [AVCaptureDevice.DeviceType] = targetPosition == .back
+                ? [.builtInTripleCamera, .builtInLiDARDepthCamera, .builtInDualWideCamera, .builtInWideAngleCamera]
+                : [.builtInTrueDepthCamera, .builtInWideAngleCamera]
+
+            let discovery = AVCaptureDevice.DiscoverySession(
+                deviceTypes: deviceTypes,
+                mediaType: .video,
+                position: targetPosition
+            )
+            guard let newDevice = discovery.devices.first,
+                  let newInput = try? AVCaptureDeviceInput(device: newDevice) else {
+                self.showToast("Câmara indisponível")
+                return
+            }
+
+            self.captureSession.beginConfiguration()
+            if let oldInput = self.videoInput {
+                self.captureSession.removeInput(oldInput)
+            }
+
+            if self.captureSession.canAddInput(newInput) {
+                self.captureSession.addInput(newInput)
+                self.videoInput = newInput
+                self.videoDevice = newDevice
+            } else if let oldInput = self.videoInput, self.captureSession.canAddInput(oldInput) {
+                self.captureSession.addInput(oldInput)
+                self.captureSession.commitConfiguration()
+                return
+            }
+
+            var lidarEnabled = false
+            if targetPosition == .back,
+               let depthFormat = Self.selectBestDepthFormat(for: newDevice, prefer4K: self.videoQuality == .uhd4K30) {
+                do {
+                    try newDevice.lockForConfiguration()
+                    if let vf = depthFormat.videoFormat { newDevice.activeFormat = vf }
+                    newDevice.activeDepthDataFormat = depthFormat.depthFormat
+                    newDevice.unlockForConfiguration()
+                    if let conn = self.depthDataOutput.connection(with: .depthData) {
+                        conn.isEnabled = true
+                    }
+                    lidarEnabled = true
+                } catch {}
+            } else {
+                if let conn = self.depthDataOutput.connection(with: .depthData) {
+                    conn.isEnabled = false
+                }
+                self.sensorLock.lock()
+                self.smoothedDistanceMeters = nil
+                self.sensorLock.unlock()
+            }
+
+            // Mirror front camera outputs naturally
+            if let photoConn = self.photoOutput.connection(with: .video), photoConn.isVideoMirroringSupported {
+                photoConn.isVideoMirrored = (targetPosition == .front)
+            }
+            if let movieConn = self.movieOutput.connection(with: .video) {
+                if movieConn.isVideoMirroringSupported {
+                    movieConn.isVideoMirrored = (targetPosition == .front)
+                }
+                if movieConn.isVideoStabilizationSupported {
+                    movieConn.preferredVideoStabilizationMode = .cinematicExtended
+                }
+            }
+
+            self.applyMaxPhotoDimensions(for: newDevice)
+            self.captureSession.commitConfiguration()
+
+            if newDevice.deviceType == .builtInTripleCamera || newDevice.deviceType == .builtInDualWideCamera {
+                self.wideZoomFactor = newDevice.virtualDeviceSwitchOverVideoZoomFactors.first?.doubleValue ?? 2.0
+            } else {
+                self.wideZoomFactor = 1.0
+            }
+
+            let minMult = Double(newDevice.minAvailableVideoZoomFactor) / self.wideZoomFactor
+            let maxMult = Double(newDevice.maxAvailableVideoZoomFactor) / self.wideZoomFactor
+            let supported = targetPosition == .back
+                ? [0.5, 1.0, 2.0, 5.0].filter { $0 >= minMult - 0.05 && $0 <= maxMult + 0.05 }
+                : [1.0]
+
+            do {
+                try newDevice.lockForConfiguration()
+                newDevice.videoZoomFactor = CGFloat(max(Double(newDevice.minAvailableVideoZoomFactor), self.wideZoomFactor))
+                if newDevice.isFocusModeSupported(.continuousAutoFocus) {
+                    newDevice.focusMode = .continuousAutoFocus
+                }
+                if newDevice.isExposureModeSupported(.continuousAutoExposure) {
+                    newDevice.exposureMode = .continuousAutoExposure
+                }
+                newDevice.unlockForConfiguration()
+            } catch {}
+
+            self.applyThermalSafeFrameRate()
+
+            DispatchQueue.main.async {
+                self.cameraPosition = targetPosition
+                self.availableLenses = supported.isEmpty ? [1.0] : supported
+                self.activeLens = 1.0
+                self.isAEAFLocked = false
+                self.hudStore.telemetry.hasLidarSupport = lidarEnabled
+            }
         }
     }
 
@@ -657,7 +803,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         showToast(autoStopEnabled ? "Auto-Stop na duração alvo: Ligado" : "Auto-Stop: Manual")
     }
 
-    func exportSessionReel() {
+    func exportSessionReel(look: ReelLook = .original) {
         guard !isExportingReel else { return }
         let orderedURLs = selectedPack.shots
             .compactMap { sessionTakes[$0.id] }
@@ -672,11 +818,12 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         isExportingReel = true
         Task {
             do {
-                try await ReelExporter.exportReel(videoURLs: orderedURLs)
+                try await ReelExporter.exportReel(videoURLs: orderedURLs, look: look)
                 await MainActor.run {
                     self.isExportingReel = false
                     self.notificationFeedback.notificationOccurred(.success)
-                    self.showToast("Reel montado (\(orderedURLs.count) planos) guardado!")
+                    let lookNote = look == .original ? "" : " • \(look.rawValue)"
+                    self.showToast("Reel montado (\(orderedURLs.count) planos\(lookNote))!")
                 }
             } catch {
                 await MainActor.run {

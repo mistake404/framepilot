@@ -1,8 +1,12 @@
 import SwiftUI
+import AVKit
 
 struct StoryboardSheet: View {
     @ObservedObject var engine: SpatialCameraEngine
     @Environment(\.dismiss) private var dismiss
+
+    @State private var selectedLook: ReelLook = .original
+    @State private var previewVideoURL: URL?
 
     var body: some View {
         NavigationStack {
@@ -19,24 +23,38 @@ struct StoryboardSheet: View {
                             ForEach(Array(engine.selectedPack.shots.enumerated()), id: \.element.id) { index, shot in
                                 let take = engine.sessionTakes[shot.id]
                                 HStack(spacing: 12) {
-                                    // Thumbnail or placeholder
-                                    ZStack {
-                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                            .fill(Color.white.opacity(0.08))
-                                            .frame(width: 52, height: 68)
-
-                                        if let thumb = take?.thumbnail {
-                                            Image(uiImage: thumb)
-                                                .resizable()
-                                                .scaledToFill()
+                                    // Thumbnail (tap to play if video)
+                                    Button {
+                                        if let url = take?.fileURL, take?.isVideo == true {
+                                            previewVideoURL = url
+                                        }
+                                    } label: {
+                                        ZStack {
+                                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                                .fill(Color.white.opacity(0.08))
                                                 .frame(width: 52, height: 68)
-                                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                                        } else {
-                                            Image(systemName: shot.kind.iconName)
-                                                .font(.system(size: 18))
-                                                .foregroundColor(.secondary)
+
+                                            if let thumb = take?.thumbnail {
+                                                Image(uiImage: thumb)
+                                                    .resizable()
+                                                    .scaledToFill()
+                                                    .frame(width: 52, height: 68)
+                                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                            } else {
+                                                Image(systemName: shot.kind.iconName)
+                                                    .font(.system(size: 18))
+                                                    .foregroundColor(.secondary)
+                                            }
+
+                                            if take?.isVideo == true && take?.fileURL != nil {
+                                                Image(systemName: "play.circle.fill")
+                                                    .font(.system(size: 20))
+                                                    .foregroundColor(.white)
+                                                    .shadow(radius: 4)
+                                            }
                                         }
                                     }
+                                    .buttonStyle(.plain)
 
                                     VStack(alignment: .leading, spacing: 3) {
                                         HStack(spacing: 6) {
@@ -55,7 +73,7 @@ struct StoryboardSheet: View {
                                             .foregroundColor(.secondary)
 
                                         if let take {
-                                            Text(take.isVideo ? String(format: "Gravado (%.1fs)", take.durationSeconds) : "Foto capturada")
+                                            Text(take.isVideo ? String(format: "Gravado (%.1fs) • Toca p/ ver", take.durationSeconds) : "Foto capturada")
                                                 .font(.caption2.monospacedDigit())
                                                 .foregroundColor(.green)
                                         } else {
@@ -82,16 +100,35 @@ struct StoryboardSheet: View {
                         }
                     }
 
-                    // 1-Click Auto-Edit Reel Export Footer
-                    VStack(spacing: 8) {
+                    // Cinematic Look Picker + 1-Click Auto-Edit Reel Export Footer
+                    VStack(spacing: 10) {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                ForEach(ReelLook.allCases) { look in
+                                    Button {
+                                        selectedLook = look
+                                    } label: {
+                                        Text(look.rawValue)
+                                            .font(.caption.bold())
+                                            .foregroundColor(selectedLook == look ? .black : .primary)
+                                            .padding(.horizontal, 12)
+                                            .padding(.vertical, 6)
+                                            .background(
+                                                Capsule().fill(selectedLook == look ? Color.yellow : Color.white.opacity(0.12))
+                                            )
+                                    }
+                                }
+                            }
+                        }
+
                         Button {
-                            engine.exportSessionReel()
+                            engine.exportSessionReel(look: selectedLook)
                         } label: {
                             HStack(spacing: 8) {
                                 if engine.isExportingReel {
                                     ProgressView()
                                         .tint(.black)
-                                    Text("A montar Reel...")
+                                    Text("A montar Reel (\(selectedLook.rawValue))...")
                                 } else {
                                     Image(systemName: "wand.and.stars")
                                     Text("Exportar Reel (\(engine.recordedVideoCount) planos)")
@@ -108,7 +145,7 @@ struct StoryboardSheet: View {
                         }
                         .disabled(engine.recordedVideoCount == 0 || engine.isExportingReel)
 
-                        Text("Junta os clips gravados pela ordem do guião e guarda o Reel pronto na galeria.")
+                        Text("Monta os clips por ordem com cor uniforme e guarda na galeria.")
                             .font(.caption2)
                             .foregroundColor(.secondary)
                             .multilineTextAlignment(.center)
@@ -123,6 +160,48 @@ struct StoryboardSheet: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Fechar") { dismiss() }
                 }
+            }
+            .sheet(isPresented: Binding(
+                get: { previewVideoURL != nil },
+                set: { if !$0 { previewVideoURL = nil } }
+            )) {
+                if let url = previewVideoURL {
+                    ClipPreviewSheet(url: url)
+                }
+            }
+        }
+    }
+}
+
+private struct ClipPreviewSheet: View {
+    let url: URL
+    @Environment(\.dismiss) private var dismiss
+    @State private var player: AVPlayer?
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                Color.black.ignoresSafeArea()
+                if let player {
+                    VideoPlayer(player: player)
+                        .ignoresSafeArea(edges: .bottom)
+                }
+            }
+            .navigationTitle("Pré-visualização")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Fechar") { dismiss() }
+                }
+            }
+            .onAppear {
+                let p = AVPlayer(url: url)
+                player = p
+                p.play()
+            }
+            .onDisappear {
+                player?.pause()
+                player = nil
             }
         }
     }

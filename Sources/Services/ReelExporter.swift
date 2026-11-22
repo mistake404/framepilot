@@ -1,7 +1,17 @@
 import Foundation
 import AVFoundation
+import CoreImage
 import Photos
 import UIKit
+
+enum ReelLook: String, CaseIterable, Identifiable {
+    case original = "Original"
+    case cinemaWarm = "Cinema Quente"
+    case moody = "Moody"
+    case mono = "P&B"
+
+    var id: String { rawValue }
+}
 
 struct SessionTake: Identifiable {
     let id = UUID()
@@ -31,8 +41,8 @@ enum ReelExporter {
         }
     }
 
-    /// Stitches recorded session video clips in storyboard order into a single video and saves it to Photos.
-    static func exportReel(videoURLs: [URL]) async throws {
+    /// Stitches recorded session video clips in storyboard order, applies optional cinematic color look, and saves to Photos.
+    static func exportReel(videoURLs: [URL], look: ReelLook = .original) async throws {
         guard !videoURLs.isEmpty else {
             throw ExportError.noVideoClips
         }
@@ -90,6 +100,18 @@ enum ReelExporter {
             throw ExportError.exporterCreationFailed
         }
 
+        if look != .original {
+            let videoComposition = AVMutableVideoComposition(
+                asset: composition,
+                applyingCIFiltersWithHandler: { request in
+                    let source = request.sourceImage.clampedToExtent()
+                    let graded = applyLook(look, to: source).cropped(to: request.sourceImage.extent)
+                    request.finish(with: graded, context: nil)
+                }
+            )
+            exportSession.videoComposition = videoComposition
+        }
+
         exportSession.outputURL = outputURL
         exportSession.outputFileType = .mov
         exportSession.shouldOptimizeForNetworkUse = true
@@ -107,6 +129,40 @@ enum ReelExporter {
 
         try await saveVideoToPhotos(url: outputURL)
         try? FileManager.default.removeItem(at: outputURL)
+    }
+
+    private static func applyLook(_ look: ReelLook, to image: CIImage) -> CIImage {
+        switch look {
+        case .original:
+            return image
+        case .cinemaWarm:
+            // Warm highlights + subtle film contrast
+            let warmed = image.applyingFilter("CITemperatureAndTint", parameters: [
+                "inputNeutral": CIVector(x: 6500, y: 0),
+                "inputTargetNeutral": CIVector(x: 5600, y: 4)
+            ])
+            return warmed.applyingFilter("CIColorControls", parameters: [
+                kCIInputSaturationKey: 1.08,
+                kCIInputContrastKey: 1.07
+            ])
+        case .moody:
+            // Deep contrast, cooler shadows, slight desaturation
+            let cooled = image.applyingFilter("CITemperatureAndTint", parameters: [
+                "inputNeutral": CIVector(x: 6500, y: 0),
+                "inputTargetNeutral": CIVector(x: 7200, y: -4)
+            ])
+            return cooled.applyingFilter("CIColorControls", parameters: [
+                kCIInputSaturationKey: 0.86,
+                kCIInputContrastKey: 1.14,
+                kCIInputBrightnessKey: -0.03
+            ])
+        case .mono:
+            // High-contrast cinema black & white
+            let mono = image.applyingFilter("CIPhotoEffectNoir")
+            return mono.applyingFilter("CIColorControls", parameters: [
+                kCIInputContrastKey: 1.08
+            ])
+        }
     }
 
     private static func saveVideoToPhotos(url: URL) async throws {

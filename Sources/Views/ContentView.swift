@@ -6,14 +6,21 @@ struct ContentView: View {
     @State private var showPackSheet = false
     @State private var showStoryboardSheet = false
     @State private var showExposureSlider = false
+    @State private var showTeleprompter = false
+    @State private var showTeleprompterEditor = false
+    @AppStorage("framepilot.teleprompter.text") private var teleprompterText: String = "3 segundos para prender atenção: mostra primeiro o resultado final, depois explica o passo a passo com energia!"
+    @AppStorage("framepilot.teleprompter.speed") private var teleprompterSpeed: Double = 28.0
 
     var body: some View {
         ZStack {
-            // Native Apple Pro Camera preview with tap-to-focus & pinch-to-zoom
+            // Native Apple Pro Camera preview with tap-to-focus, long-press AE/AF lock & pinch-to-zoom
             ProCameraPreviewView(
                 session: engine.captureSession,
                 onFocusTap: { devicePoint, screenPoint in
                     engine.focus(at: devicePoint, screenPoint: screenPoint)
+                },
+                onLongPressLock: { devicePoint, screenPoint in
+                    engine.lockFocusAndExposure(at: devicePoint, screenPoint: screenPoint)
                 },
                 onPinchZoom: { scale, state in
                     engine.handlePinchZoom(scale: scale, state: state)
@@ -66,16 +73,30 @@ struct ContentView: View {
                     .allowsHitTesting(false)
             }
 
-            // Controls overlay (Top telemetry + Bottom capture dock)
+            // Controls overlay (Top telemetry + Teleprompter + Bottom capture dock)
             VStack(spacing: 0) {
                 TopTelemetryBar(
                     hudStore: engine.hudStore,
                     overlayMode: engine.overlayMode,
                     isThermalEcoActive: engine.isThermalEcoActive,
-                    onCycleOverlay: { engine.cycleOverlayMode() }
+                    isAEAFLocked: engine.isAEAFLocked,
+                    showTeleprompter: showTeleprompter,
+                    onCycleOverlay: { engine.cycleOverlayMode() },
+                    onToggleTeleprompter: { showTeleprompter.toggle() }
                 )
                 .padding(.horizontal, 14)
                 .padding(.top, 8)
+
+                if showTeleprompter {
+                    TeleprompterOverlayView(
+                        scriptText: teleprompterText,
+                        isScrolling: engine.isRecording,
+                        speedPointsPerSecond: teleprompterSpeed,
+                        onEditTap: { showTeleprompterEditor = true }
+                    )
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                }
 
                 Spacer()
 
@@ -210,6 +231,18 @@ struct ContentView: View {
                             .background(Circle().fill(Color.black.opacity(0.5)))
                     }
 
+                    // Flip Front / Back Camera
+                    Button {
+                        engine.flipCamera()
+                    } label: {
+                        Image(systemName: "camera.rotate")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(engine.cameraPosition == .front ? .yellow : .white)
+                            .frame(width: 30, height: 28)
+                            .background(Circle().fill(Color.black.opacity(0.5)))
+                    }
+                    .disabled(engine.isRecording)
+
                     // Self-timer (Off / 3s / 10s)
                     Button {
                         engine.cycleTimer()
@@ -272,6 +305,13 @@ struct ContentView: View {
         .sheet(isPresented: $showStoryboardSheet) {
             StoryboardSheet(engine: engine)
                 .presentationDetents([.medium, .large])
+        }
+        .sheet(isPresented: $showTeleprompterEditor) {
+            TeleprompterEditorSheet(
+                scriptText: $teleprompterText,
+                speedPointsPerSecond: $teleprompterSpeed
+            )
+            .presentationDetents([.medium, .large])
         }
     }
 
@@ -392,12 +432,15 @@ private struct TopTelemetryBar: View {
     @ObservedObject var hudStore: HUDTelemetryStore
     let overlayMode: OverlayMode
     let isThermalEcoActive: Bool
+    let isAEAFLocked: Bool
+    let showTeleprompter: Bool
     let onCycleOverlay: () -> Void
+    let onToggleTeleprompter: () -> Void
 
     var body: some View {
         let telemetry = hudStore.telemetry
 
-        HStack(spacing: 7) {
+        HStack(spacing: 6) {
             telemetryPill(
                 icon: telemetry.hasLidarSupport ? "dot.radiowaves.left.and.right" : "ruler",
                 text: telemetry.formattedDistance,
@@ -410,11 +453,20 @@ private struct TopTelemetryBar: View {
                 accent: .yellow
             )
 
-            telemetryPill(
-                icon: telemetry.detectedShotKind.iconName,
-                text: telemetry.detectedShotKind.rawValue,
-                accent: .white
-            )
+            if isAEAFLocked {
+                Text("AE/AF")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundColor(.black)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 5)
+                    .background(Capsule().fill(Color.yellow))
+            } else {
+                telemetryPill(
+                    icon: telemetry.detectedShotKind.iconName,
+                    text: telemetry.detectedShotKind.rawValue,
+                    accent: .white
+                )
+            }
 
             if isThermalEcoActive {
                 Image(systemName: "snowflake")
@@ -426,6 +478,14 @@ private struct TopTelemetryBar: View {
 
             Spacer()
 
+            Button(action: onToggleTeleprompter) {
+                Image(systemName: "text.alignleft")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(showTeleprompter ? .yellow : .white.opacity(0.85))
+                    .frame(width: 30, height: 28)
+                    .background(Circle().fill(Color.black.opacity(0.58)))
+            }
+
             Button(action: onCycleOverlay) {
                 HStack(spacing: 4) {
                     Image(systemName: overlayMode.iconName)
@@ -434,7 +494,7 @@ private struct TopTelemetryBar: View {
                         .font(.system(size: 10, weight: .bold))
                 }
                 .foregroundColor(overlayMode == .reelsSafeZone ? .cyan : (overlayMode == .thirds ? .yellow : .white.opacity(0.7)))
-                .padding(.horizontal, 9)
+                .padding(.horizontal, 8)
                 .padding(.vertical, 6)
                 .background(Capsule().fill(Color.black.opacity(0.58)))
             }
