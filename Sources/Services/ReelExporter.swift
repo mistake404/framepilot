@@ -47,7 +47,10 @@ enum ReelExporter {
         videoURLs: [URL],
         look: ReelLook = .original,
         includeSoundDesign: Bool = true,
-        includeViralCaptions: Bool = false
+        includeViralCaptions: Bool = false,
+        musicURL: URL? = nil,
+        beatSyncEnabled: Bool = true,
+        autoDuckingEnabled: Bool = true
     ) async throws {
         guard !videoURLs.isEmpty else {
             throw ExportError.noVideoClips
@@ -70,14 +73,30 @@ enum ReelExporter {
         var clips: [ReelInstruction] = []
         var sharedPortraitTransform: CGAffineTransform?
         var cursor = CMTime.zero
-        let recognizer = includeViralCaptions ? await CaptionService.localRecognizer() : nil
-
+        var sources: [(URL, AVURLAsset, AVAssetTrack, CMTimeRange)] = []
+        var maximumDuration = CMTime.zero
         for url in videoURLs {
             try Task.checkCancellation()
             let asset = AVURLAsset(url: url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
             guard let video = try await asset.loadTracks(withMediaType: .video).first else { continue }
             let range = try await video.load(.timeRange)
             guard range.start.isNumeric, range.duration.isNumeric, range.duration.seconds > 0.05 else { continue }
+            sources.append((url, asset, video, range))
+            maximumDuration = maximumDuration + range.duration
+        }
+        guard !sources.isEmpty else { throw ExportError.noVideoClips }
+        let music: Soundtrack?
+        if let musicURL {
+            music = try await Soundtrack(url: musicURL, maximumDuration: maximumDuration, detectBeats: beatSyncEnabled)
+        } else {
+            music = nil
+        }
+        var speech: [Range<Double>] = []
+        let recognizer = includeViralCaptions ? await CaptionService.localRecognizer() : nil
+        for (url, asset, video, sourceRange) in sources {
+            try Task.checkCancellation()
+            let duration = music?.cutDuration(at: cursor, available: sourceRange.duration) ?? sourceRange.duration
+            let range = CMTimeRange(start: sourceRange.start, duration: duration)
 
             let size = try await video.load(.naturalSize)
             let orientation = try await video.load(.preferredTransform)
@@ -108,6 +127,10 @@ enum ReelExporter {
                     guard let compAudioTrack else { throw ExportError.exporterCreationFailed }
                     let audioStart = cursor + (overlap.start - range.start)
                     try compAudioTrack.insertTimeRange(overlap, of: audio, at: audioStart)
+                    if music != nil, autoDuckingEnabled {
+                        speech += try BeatSyncEngine.voiceIntervals(in: asset, track: audio, range: overlap,
+                                                                   reelStart: audioStart)
+                    }
                     if let recognizer {
                         cues = await CaptionService.cues(for: url, audioTrack: audio, trackStart: audioRange.start,
                                                          range: overlap, reelStart: audioStart, recognizer: recognizer)
@@ -120,7 +143,6 @@ enum ReelExporter {
             cursor = cursor + range.duration
         }
 
-        guard !clips.isEmpty else { throw ExportError.noVideoClips }
         try Task.checkCancellation()
 
         // Composition segments refer back to this WAV until the export finishes.
@@ -144,8 +166,10 @@ enum ReelExporter {
             videoComposition = makeVideoComposition(for: clips, track: compVideoTrack,
                                                    renderSize: renderSize, needsEffects: needsEffects)
         }
+        let musicMix = try music?.insert(in: composition, end: cursor, speech: speech)
         guard let exportSession = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality)
         else { throw ExportError.exporterCreationFailed }
+        exportSession.audioMix = musicMix
         exportSession.videoComposition = videoComposition
         exportSession.outputURL = outputURL
         exportSession.outputFileType = .mov
@@ -161,6 +185,118 @@ enum ReelExporter {
             throw ExportError.exportFailed(exportSession.error?.localizedDescription ?? "Falha desconhecida")
         }
         try await saveVideoToPhotos(url: outputURL)
+    }
+
+    private struct Soundtrack {
+        let asset: AVURLAsset
+        let track: AVAssetTrack
+        let range: CMTimeRange
+        let beats: [Double]
+
+        init(url: URL, maximumDuration: CMTime, detectBeats: Bool) async throws {
+            let asset = AVURLAsset(url: url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
+            guard let track = try await asset.loadTracks(withMediaType: .audio).first else {
+                throw ExportError.exportFailed("O ficheiro de música não contém uma pista de áudio.")
+            }
+            let range = try await track.load(.timeRange)
+            guard range.start.isNumeric, range.duration.isNumeric, range.duration > .zero else {
+                throw ExportError.exportFailed("A faixa de música tem uma duração inválida.")
+            }
+            self.asset = asset
+            self.track = track
+            self.range = range
+            let analysisRange = CMTimeRange(start: range.start, duration: min(range.duration, maximumDuration))
+            beats = detectBeats ? try BeatSyncEngine.beats(in: asset, track: track, range: analysisRange) : []
+        }
+
+        func cutDuration(at start: CMTime, available: CMTime) -> CMTime {
+            let minimum = CMTime(value: 4, timescale: 5)
+            guard available >= minimum, let lastBeat = beats.last else { return available }
+            let end = (start + available).seconds
+            let period = range.duration.seconds
+            let cycleStart = floor(end / period) * period
+            // Prefer the latest usable beat, including the tail of the previous loop.
+            let beat = beats.last(where: { $0 <= end - cycleStart }).map { cycleStart + $0 }
+                ?? (cycleStart - period + lastBeat)
+            let length = CMTime(seconds: beat, preferredTimescale: 48_000) - start
+            return length >= minimum && length <= available ? length : available
+        }
+
+        func insert(in composition: AVMutableComposition, end: CMTime,
+                    speech: [Range<Double>]) throws -> AVAudioMix {
+            guard let music = composition.addMutableTrack(withMediaType: .audio,
+                                                          preferredTrackID: kCMPersistentTrackID_Invalid)
+            else { throw ExportError.exporterCreationFailed }
+            var cursor = CMTime.zero
+            while cursor < end {
+                try Task.checkCancellation()
+                let duration = min(range.duration, end - cursor)
+                try music.insertTimeRange(CMTimeRange(start: range.start, duration: duration), of: track, at: cursor)
+                cursor = cursor + duration
+            }
+            let parameters = AVMutableAudioMixInputParameters(track: music)
+            Self.applyVolume(to: parameters, end: end, speech: speech)
+            let mix = AVMutableAudioMix()
+            mix.inputParameters = [parameters]
+            return mix
+        }
+
+        private static func applyVolume(to parameters: AVMutableAudioMixInputParameters, end: CMTime,
+                                        speech: [Range<Double>]) {
+            let normal = 0.85, quiet = 0.22, ramp = 0.25
+            let duration = end.seconds
+            let fadeStart = max(0, duration - 0.8)
+            var phrases: [Range<Double>] = []
+            for span in speech {
+                if let last = phrases.last, span.lowerBound - last.upperBound <= 2 * ramp {
+                    phrases[phrases.count - 1] = last.lowerBound..<max(last.upperBound, span.upperBound)
+                } else {
+                    phrases.append(span)
+                }
+            }
+
+            // Split at the fade boundary so ducking and fade-out share one continuous envelope.
+            var time = 0.0
+            var gain = normal
+            var volume = normal
+            var fadeCeiling = normal
+            func mixTime(_ t: Double) -> CMTime {
+                t >= duration ? end : CMTime(seconds: t, preferredTimescale: 48_000)
+            }
+            func emit(until stop: Double, gain target: Double) {
+                var nextVolume = target
+                if stop >= fadeStart {
+                    // A release in the fade must never bring the music back up.
+                    fadeCeiling = min(fadeCeiling, target)
+                    nextVolume = fadeCeiling * (duration - stop) / (duration - fadeStart)
+                }
+                let interval = CMTimeRange(start: mixTime(time), end: mixTime(stop))
+                if interval.duration > .zero {
+                    parameters.setVolumeRamp(fromStartVolume: Float(volume), toEndVolume: Float(nextVolume),
+                                             timeRange: interval)
+                }
+                time = stop
+                gain = target
+                volume = nextVolume
+            }
+            func segment(to stop: Double, gain target: Double) {
+                let stop = min(duration, stop)
+                if time < fadeStart, fadeStart < stop {
+                    let fraction = (fadeStart - time) / (stop - time)
+                    emit(until: fadeStart, gain: gain + (target - gain) * fraction)
+                }
+                emit(until: stop, gain: target)
+            }
+            for phrase in phrases {
+                segment(to: max(0, phrase.lowerBound - ramp), gain: normal)
+                segment(to: phrase.lowerBound, gain: quiet)
+                segment(to: phrase.upperBound, gain: quiet)
+                // Preserve the release slope when it runs into the end of the Reel.
+                let release = min(ramp, max(0, duration - phrase.upperBound))
+                segment(to: phrase.upperBound + release, gain: quiet + (normal - quiet) * release / ramp)
+            }
+            segment(to: duration, gain: normal)
+        }
     }
 
     private static func makeVideoComposition(for clips: [ReelInstruction], track: AVCompositionTrack,

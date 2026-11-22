@@ -119,6 +119,10 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     @Published var isVirtualDollyActive: Bool = false
     @Published var includeSoundDesign: Bool = true
     @Published var includeDynamicCaptions: Bool = false
+    @Published private(set) var selectedMusicURL: URL?
+    @Published private(set) var isImportingMusic = false
+    @Published var beatSyncEnabled = true
+    @Published var autoDuckingEnabled = true
 
     // UI state lives on the main queue. Capture graph and lens commands live on sessionQueue.
     private var startID: UUID?
@@ -251,6 +255,9 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     }
 
     deinit {
+        if let selectedMusicURL {
+            try? FileManager.default.removeItem(at: selectedMusicURL.deletingLastPathComponent())
+        }
         hudTimer?.cancel()
         rackFocusTimer?.cancel()
         let timers = [countdownTimer, recordingTimer]
@@ -932,8 +939,60 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         showToast(autoStopEnabled ? "Auto-Stop na duração alvo: Ligado" : "Auto-Stop: Manual")
     }
 
+    @MainActor
+    func selectMusic(_ url: URL) async throws {
+        guard !isExportingReel, !isImportingMusic else { return }
+        isImportingMusic = true
+        defer { isImportingMusic = false }
+        let copy = try await Self.copyMusic(from: url)
+        removeMusic()
+        selectedMusicURL = copy
+    }
+
+    private static func copyMusic(from url: URL) async throws -> URL {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        let files = FileManager.default
+        let directory = files.temporaryDirectory.appendingPathComponent("FramePilot-Music-" + UUID().uuidString,
+                                                                      isDirectory: true)
+        let destination = directory.appendingPathComponent(url.lastPathComponent)
+        try files.createDirectory(at: directory, withIntermediateDirectories: false)
+        do {
+            var coordinationError: NSError?
+            var copyError: Error?
+            NSFileCoordinator().coordinate(readingItemAt: url, options: .withoutChanges, error: &coordinationError) { source in
+                do {
+                    let values = try source.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+                    guard values.isRegularFile == true, values.isSymbolicLink != true else {
+                        throw CocoaError(.fileReadUnsupportedScheme)
+                    }
+                    try files.copyItem(at: source, to: destination)
+                } catch { copyError = error }
+            }
+            if let coordinationError { throw coordinationError }
+            if let copyError { throw copyError }
+            let asset = AVURLAsset(url: destination)
+            guard let track = try await asset.loadTracks(withMediaType: .audio).first,
+                  try await track.load(.timeRange).duration.seconds > 0 else {
+                throw ReelExporter.ExportError.exportFailed("O ficheiro não contém áudio utilizável.")
+            }
+            try Task.checkCancellation()
+            return destination
+        } catch {
+            try? files.removeItem(at: directory)
+            throw error
+        }
+    }
+
+    @MainActor
+    func removeMusic() {
+        guard !isExportingReel, let selectedMusicURL else { return }
+        self.selectedMusicURL = nil
+        try? FileManager.default.removeItem(at: selectedMusicURL.deletingLastPathComponent())
+    }
+
     func exportSessionReel(look: ReelLook = .original) {
-        guard !isExportingReel, !captureBusy else { return }
+        guard !isExportingReel, !isImportingMusic, !captureBusy else { return }
         let orderedURLs = selectedPack.shots
             .compactMap { sessionTakes[$0.id] }
             .filter { $0.isVideo }
@@ -946,6 +1005,9 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
 
         let soundDesign = includeSoundDesign
         let captions = includeDynamicCaptions
+        let music = selectedMusicURL
+        let beatSync = beatSyncEnabled
+        let ducking = autoDuckingEnabled
         isExportingReel = true
         Task {
             do {
@@ -953,7 +1015,10 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
                     videoURLs: orderedURLs,
                     look: look,
                     includeSoundDesign: soundDesign,
-                    includeViralCaptions: captions
+                    includeViralCaptions: captions,
+                    musicURL: music,
+                    beatSyncEnabled: beatSync,
+                    autoDuckingEnabled: ducking
                 )
                 await MainActor.run {
                     self.isExportingReel = false

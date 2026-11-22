@@ -1,5 +1,6 @@
 import SwiftUI
 import AVKit
+import UniformTypeIdentifiers
 
 struct StoryboardSheet: View {
     @ObservedObject var engine: SpatialCameraEngine
@@ -8,6 +9,8 @@ struct StoryboardSheet: View {
 
     @State private var selectedLook: ReelLook = .film35mm
     @State private var previewVideoURL: URL?
+    @State private var showMusicPicker = false
+    @State private var showMusicError = false
 
     var body: some View {
         NavigationStack {
@@ -22,6 +25,7 @@ struct StoryboardSheet: View {
                     List {
                         plansSection
                         exportOptions
+                        musicSection
                     }
                     .listStyle(.insetGrouped)
                     .safeAreaInset(edge: .bottom, spacing: 0) { exportBar }
@@ -29,6 +33,23 @@ struct StoryboardSheet: View {
             }
             .navigationTitle("Storyboard da sessão")
             .navigationBarTitleDisplayMode(.inline)
+            .fileImporter(isPresented: $showMusicPicker, allowedContentTypes: [.audio]) { result in
+                Task { @MainActor in
+                    do {
+                        let url = try result.get()
+                        try await engine.selectMusic(url)
+                    } catch let error as CocoaError where error.code == .userCancelled {
+                        return
+                    } catch {
+                        showMusicError = true
+                    }
+                }
+            }
+            .alert("Não foi possível importar a música", isPresented: $showMusicError) {
+                Button("Fechar", role: .cancel) {}
+            } message: {
+                Text("Verifica se o ficheiro está disponível e contém uma faixa de áudio que o iPhone consiga ler.")
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Fechar") { dismiss() }
@@ -133,6 +154,35 @@ struct StoryboardSheet: View {
         }
     }
 
+    private var musicSection: some View {
+        Section("Música & Ritmo") {
+            HStack {
+                Button { showMusicPicker = true } label: {
+                    Label(engine.selectedMusicURL?.lastPathComponent ?? "Escolher música", systemImage: "music.note")
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityHint("Abre o seletor de ficheiros de áudio.")
+                Spacer()
+                if engine.isImportingMusic {
+                    ProgressView().accessibilityLabel("A importar música")
+                } else if engine.selectedMusicURL != nil {
+                    Button(role: .destructive) { engine.removeMusic() } label: {
+                        Image(systemName: "trash").frame(minWidth: 44, minHeight: 44)
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("Remover música")
+                }
+            }
+            Toggle("Corte na Batida (Beat-Sync)", isOn: $engine.beatSyncEnabled)
+                .disabled(engine.selectedMusicURL == nil)
+            Toggle("Auto-Ducking na Voz", isOn: $engine.autoDuckingEnabled)
+                .disabled(engine.selectedMusicURL == nil)
+        }
+        .disabled(engine.isExportingReel || engine.isImportingMusic)
+    }
+
     private var exportBar: some View {
         let count = engine.recordedVideoCount
         let isExporting = engine.isExportingReel
@@ -161,7 +211,7 @@ struct StoryboardSheet: View {
                             in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
             .buttonStyle(.plain)
-            .disabled(count == 0 || isExporting)
+            .disabled(count == 0 || isExporting || engine.isImportingMusic)
 
             Text(count == 0 ? "Grava pelo menos um plano em vídeo para exportar." : "Os vídeos são montados pela ordem do guião e guardados num Reel em Fotografias.")
                 .font(.caption)
