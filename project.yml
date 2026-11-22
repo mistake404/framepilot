@@ -11,8 +11,8 @@ settings:
     SWIFT_VERSION: "5.0" # Swift 5 language mode for the Swift 5.9 sources.
     TARGETED_DEVICE_FAMILY: "1"
     SUPPORTS_MACCATALYST: "NO"
-    MARKETING_VERSION: "1.4.0"
-    CURRENT_PROJECT_VERSION: "15"
+    MARKETING_VERSION: "1.5.0"
+    CURRENT_PROJECT_VERSION: "16"
 
 targets:
   FramePilot:

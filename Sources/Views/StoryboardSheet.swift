@@ -9,6 +9,7 @@ struct StoryboardSheet: View {
 
     @State private var selectedLook: ReelLook = .film35mm
     @State private var previewVideoURL: URL?
+    @State private var previewPhotoImage: UIImage?
     @State private var importKind: ImportKind = .music
     @State private var showFilePicker = false
     @State private var showImportError = false
@@ -88,6 +89,14 @@ struct StoryboardSheet: View {
             .sheet(isPresented: $showCaptionEditor) {
                 CaptionEditorSheet(engine: engine)
             }
+            .sheet(isPresented: Binding(
+                get: { previewPhotoImage != nil },
+                set: { if !$0 { previewPhotoImage = nil } }
+            )) {
+                if let image = previewPhotoImage {
+                    PhotoPreviewSheet(image: image)
+                }
+            }
         }
     }
 
@@ -114,6 +123,21 @@ struct StoryboardSheet: View {
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("Reproduzir plano \(index + 1), \(shot.title)")
+                    } else if let thumb = take?.thumbnail, take?.isVideo == false {
+                        Button {
+                            previewPhotoImage = thumb
+                        } label: {
+                            thumbnail.overlay(alignment: .bottomTrailing) {
+                                Image(systemName: "magnifyingglass")
+                                    .font(.system(size: 10, weight: .bold))
+                                    .foregroundStyle(.white)
+                                    .padding(4)
+                                    .background(.black.opacity(0.65), in: Circle())
+                                    .padding(3)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Ver fotografia do plano \(index + 1), \(shot.title)")
                     } else {
                         thumbnail.accessibilityHidden(true)
                     }
@@ -121,7 +145,8 @@ struct StoryboardSheet: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("\(index + 1). \(shot.title)")
                             .font(.headline)
-                        Text("\(shot.kind.rawValue) · \(shot.lensLabel) · Alvo \(shot.durationLabel)")
+                        let modeMeta = shot.preferredMode == .photo ? "Foto 48MP" : "Alvo \(shot.durationLabel)"
+                        Text("\(shot.kind.rawValue) · \(shot.lensLabel) · \(modeMeta)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         if let take {
@@ -131,7 +156,7 @@ struct StoryboardSheet: View {
                                 .foregroundStyle(.primary)
                                 .font(.caption.weight(.medium))
                         } else {
-                            Label("Por gravar", systemImage: "circle.dashed")
+                            Label(shot.preferredMode == .photo ? "Por fotografar" : "Por gravar", systemImage: "circle.dashed")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -489,6 +514,30 @@ private struct CaptionEditorSheet: View {
             }
             .onAppear {
                 engine.prepareCaptionsForEditing()
+            }
+        }
+    }
+}
+
+private struct PhotoPreviewSheet: View {
+    let image: UIImage
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                Color.black.ignoresSafeArea()
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .ignoresSafeArea(edges: .bottom)
+            }
+            .navigationTitle("Fotografia Captada")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Fechar") { dismiss() }
+                }
             }
         }
     }

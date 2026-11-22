@@ -918,6 +918,358 @@ struct ScenePack: Identifiable, Hashable, Codable {
             ]
         ),
         ScenePack(
+            id: "photo-carousel-ig",
+            name: "Carrossel Instagram 4:5 (Foto)",
+            subtitle: "5 fotos 48MP com ritmo editorial para feed de alto impacto",
+            iconName: "photo.stack.fill",
+            shots: [
+                ShotTemplate(
+                    id: "igc-1",
+                    title: "Capa Editorial Hero",
+                    kind: .medium,
+                    preferredMode: .photo,
+                    recommendedLens: 2.0,
+                    targetDurationSeconds: 0,
+                    targetDistanceRange: 1.5...3.2,
+                    targetPitchRange: -4...10,
+                    maxRollDegrees: 1.5,
+                    movementHint: "Estático firme",
+                    directorTip: "Usa máscara 4:5 e 2x para comprimir o fundo na foto de capa."
+                ),
+                ShotTemplate(
+                    id: "igc-2",
+                    title: "Ambiente & Contexto",
+                    kind: .establishing,
+                    preferredMode: .photo,
+                    recommendedLens: 1.0,
+                    targetDurationSeconds: 0,
+                    targetDistanceRange: 2.5...5.5,
+                    targetPitchRange: -5...8,
+                    maxRollDegrees: 1.5,
+                    movementHint: "Estático nivelado",
+                    directorTip: "Mostra o cenário completo para dar respiro visual ao slide 2."
+                ),
+                ShotTemplate(
+                    id: "igc-3",
+                    title: "Retrato Telefoto",
+                    kind: .closeUp,
+                    preferredMode: .photo,
+                    recommendedLens: 5.0,
+                    targetDurationSeconds: 0,
+                    targetDistanceRange: 2.0...4.5,
+                    targetPitchRange: -4...6,
+                    maxRollDegrees: 2.0,
+                    movementHint: "Mão firme / 5x",
+                    directorTip: "5x cria bokeh ótico real sem precisar de modo Retrato artificial."
+                ),
+                ShotTemplate(
+                    id: "igc-4",
+                    title: "Detalhe & Textura",
+                    kind: .detail,
+                    preferredMode: .photo,
+                    recommendedLens: 2.0,
+                    targetDurationSeconds: 0,
+                    targetDistanceRange: 0.35...0.85,
+                    targetPitchRange: -25...5,
+                    maxRollDegrees: 3.0,
+                    movementHint: "Foco por toque",
+                    directorTip: "Relógio, café, tecido ou acessório para quebrar o ritmo do carrossel."
+                ),
+                ShotTemplate(
+                    id: "igc-5",
+                    title: "Fecho / Perspetiva",
+                    kind: .lowAngle,
+                    preferredMode: .photo,
+                    recommendedLens: 0.5,
+                    targetDurationSeconds: 0,
+                    targetDistanceRange: 1.4...3.5,
+                    targetPitchRange: 12...28,
+                    maxRollDegrees: 2.0,
+                    movementHint: "Contrapicado limpo",
+                    directorTip: "Fecha o carrossel com uma foto marcante olhando ligeiramente para cima."
+                )
+            ]
+        ),
+        ScenePack(
+            id: "photo-streetwear-editorial",
+            name: "Editorial Moda & Streetwear (Foto)",
+            subtitle: "5 fotos 48MP de look, compressão 5x e detalhes de estilo",
+            iconName: "figure.stand",
+            shots: [
+                ShotTemplate(
+                    id: "stw-1",
+                    title: "Look Completo Contrapicado",
+                    kind: .lowAngle,
+                    preferredMode: .photo,
+                    recommendedLens: 1.0,
+                    targetDurationSeconds: 0,
+                    targetDistanceRange: 2.0...3.8,
+                    targetPitchRange: 8...20,
+                    maxRollDegrees: 1.5,
+                    movementHint: "Câmara à altura da cintura",
+                    directorTip: "Baixa o iPhone à cintura e inclina ligeiramente para cima para alongar a silhueta."
+                ),
+                ShotTemplate(
+                    id: "stw-2",
+                    title: "Compressão Urbana 5x",
+                    kind: .medium,
+                    preferredMode: .photo,
+                    recommendedLens: 5.0,
+                    targetDurationSeconds: 0,
+                    targetDistanceRange: 3.0...6.0,
+                    targetPitchRange: -3...8,
+                    maxRollDegrees: 1.5,
+                    movementHint: "Estático com cotovelos juntos",
+                    directorTip: "Afasta-te com 5x para trazer edifícios e luzes do fundo para perto."
+                ),
+                ShotTemplate(
+                    id: "stw-3",
+                    title: "Ténis & Chão 0.5x",
+                    kind: .lowAngle,
+                    preferredMode: .photo,
+                    recommendedLens: 0.5,
+                    targetDurationSeconds: 0,
+                    targetDistanceRange: 0.45...1.1,
+                    targetPitchRange: 15...35,
+                    maxRollDegrees: 2.5,
+                    movementHint: "Rente ao chão",
+                    directorTip: "0.5x perto do calçado cria perspetiva dramática de revista."
+                ),
+                ShotTemplate(
+                    id: "stw-4",
+                    title: "Retrato Olhar Lateral",
+                    kind: .closeUp,
+                    preferredMode: .photo,
+                    recommendedLens: 2.0,
+                    targetDurationSeconds: 0,
+                    targetDistanceRange: 0.9...1.8,
+                    targetPitchRange: -4...6,
+                    maxRollDegrees: 2.0,
+                    movementHint: "Toca nos olhos para focar",
+                    directorTip: "Procura luz lateral de janela ou sombra aberta para pele natural."
+                ),
+                ShotTemplate(
+                    id: "stw-5",
+                    title: "A Caminhar Natural",
+                    kind: .establishing,
+                    preferredMode: .photo,
+                    recommendedLens: 1.0,
+                    targetDurationSeconds: 0,
+                    targetDistanceRange: 2.5...4.5,
+                    targetPitchRange: -3...6,
+                    maxRollDegrees: 1.5,
+                    movementHint: "Dispara no meio do passo",
+                    directorTip: "Pede para caminhar devagar e dispara quando o pé da frente pousar."
+                )
+            ]
+        ),
+        ScenePack(
+            id: "photo-cars-pro",
+            name: "Fotografia Automóvel Pro (Foto)",
+            subtitle: "5 fotos 48MP dignas de catálogo automóvel",
+            iconName: "car.side.fill",
+            shots: [
+                ShotTemplate(
+                    id: "car-p1",
+                    title: "3/4 Frontal Imponente",
+                    kind: .lowAngle,
+                    preferredMode: .photo,
+                    recommendedLens: 2.0,
+                    targetDurationSeconds: 0,
+                    targetDistanceRange: 3.0...6.0,
+                    targetPitchRange: 4...16,
+                    maxRollDegrees: 1.5,
+                    movementHint: "Agachado à altura do farol",
+                    directorTip: "2x elimina distorção do para-choques; vira as rodas ligeiramente para a câmara."
+                ),
+                ShotTemplate(
+                    id: "car-p2",
+                    title: "Farol & Grelha 5x",
+                    kind: .detail,
+                    preferredMode: .photo,
+                    recommendedLens: 5.0,
+                    targetDurationSeconds: 0,
+                    targetDistanceRange: 1.2...2.8,
+                    targetPitchRange: -8...8,
+                    maxRollDegrees: 2.0,
+                    movementHint: "Estático / baixa EV -0.3",
+                    directorTip: "5x com -0.3 EV faz os LEDs do farol e os reflexos brilharem."
+                ),
+                ShotTemplate(
+                    id: "car-p3",
+                    title: "Perfil Lateral Perfeito",
+                    kind: .establishing,
+                    preferredMode: .photo,
+                    recommendedLens: 2.0,
+                    targetDurationSeconds: 0,
+                    targetDistanceRange: 4.0...7.5,
+                    targetPitchRange: -2...4,
+                    maxRollDegrees: 1.0,
+                    movementHint: "Horizonte rigoroso 0°",
+                    directorTip: "Centra perfeitamente na lateral com o horizonte travado a 0°."
+                ),
+                ShotTemplate(
+                    id: "car-p4",
+                    title: "Interior & Cockpit 0.5x",
+                    kind: .medium,
+                    preferredMode: .photo,
+                    recommendedLens: 0.5,
+                    targetDurationSeconds: 0,
+                    targetDistanceRange: 0.6...1.4,
+                    targetPitchRange: -15...5,
+                    maxRollDegrees: 2.0,
+                    movementHint: "Desde o banco traseiro",
+                    directorTip: "0.5x captura o volante, ecrãs e consola central numa só imagem."
+                ),
+                ShotTemplate(
+                    id: "car-p5",
+                    title: "Traseira & Difusor",
+                    kind: .lowAngle,
+                    preferredMode: .photo,
+                    recommendedLens: 1.0,
+                    targetDurationSeconds: 0,
+                    targetDistanceRange: 2.0...4.2,
+                    targetPitchRange: 8...20,
+                    maxRollDegrees: 1.5,
+                    movementHint: "Baixo atrás das ponteiras",
+                    directorTip: "Liga os mínimos traseiros para destacar a assinatura luminosa."
+                )
+            ]
+        ),
+        ScenePack(
+            id: "photo-food-flatlay",
+            name: "Gastronomia & Flat-Lay (Foto)",
+            subtitle: "4 fotos 48MP com picado 90° e detalhes apetitosos",
+            iconName: "fork.knife.circle.fill",
+            shots: [
+                ShotTemplate(
+                    id: "food-p1",
+                    title: "Flat-Lay 90° Perfeito",
+                    kind: .highAngle,
+                    preferredMode: .photo,
+                    recommendedLens: 1.0,
+                    targetDurationSeconds: 0,
+                    targetDistanceRange: 0.55...1.1,
+                    targetPitchRange: -90...(-72),
+                    maxRollDegrees: 5.0,
+                    movementHint: "Paralelo à mesa",
+                    directorTip: "Usa a régua lateral até ficar verde no fundo (-85°) sem fazer sombra no prato."
+                ),
+                ShotTemplate(
+                    id: "food-p2",
+                    title: "Ângulo 45° Editorial",
+                    kind: .medium,
+                    preferredMode: .photo,
+                    recommendedLens: 2.0,
+                    targetDurationSeconds: 0,
+                    targetDistanceRange: 0.5...1.0,
+                    targetPitchRange: -52...(-35),
+                    maxRollDegrees: 2.5,
+                    movementHint: "Luz de janela lateral",
+                    directorTip: "2x a 45° é o ângulo clássico que mostra altura do prato e ingredientes."
+                ),
+                ShotTemplate(
+                    id: "food-p3",
+                    title: "Macro Textura & Brilho",
+                    kind: .detail,
+                    preferredMode: .photo,
+                    recommendedLens: 2.0,
+                    targetDurationSeconds: 0,
+                    targetDistanceRange: 0.25...0.55,
+                    targetPitchRange: -25...0,
+                    maxRollDegrees: 3.0,
+                    movementHint: "Toca na zona mais suculenta",
+                    directorTip: "Enche o ecrã com o corte, molho ou vapor do prato."
+                ),
+                ShotTemplate(
+                    id: "food-p4",
+                    title: "Mesa & Ambiente",
+                    kind: .establishing,
+                    preferredMode: .photo,
+                    recommendedLens: 1.0,
+                    targetDurationSeconds: 0,
+                    targetDistanceRange: 1.1...2.2,
+                    targetPitchRange: -30...(-10),
+                    maxRollDegrees: 2.0,
+                    movementHint: "Inclui bebida e mãos",
+                    directorTip: "Mostra copos, talheres e a atmosfera do restaurante."
+                )
+            ]
+        ),
+        ScenePack(
+            id: "photo-architecture-travel",
+            name: "Arquitetura & Viagem (Foto)",
+            subtitle: "5 fotos 48MP com simetria, grande angular e telefoto 5x",
+            iconName: "building.columns.fill",
+            shots: [
+                ShotTemplate(
+                    id: "arch-1",
+                    title: "Simetria Grande Angular",
+                    kind: .establishing,
+                    preferredMode: .photo,
+                    recommendedLens: 0.5,
+                    targetDurationSeconds: 0,
+                    targetDistanceRange: 3.0...8.0,
+                    targetPitchRange: -3...6,
+                    maxRollDegrees: 1.0,
+                    movementHint: "Horizonte exato a 0°",
+                    directorTip: "Alinha as colunas ou corredores com a grelha dos terços."
+                ),
+                ShotTemplate(
+                    id: "arch-2",
+                    title: "Fachada Olhar ao Céu",
+                    kind: .lowAngle,
+                    preferredMode: .photo,
+                    recommendedLens: 0.5,
+                    targetDurationSeconds: 0,
+                    targetDistanceRange: 2.5...7.0,
+                    targetPitchRange: 30...65,
+                    maxRollDegrees: 3.0,
+                    movementHint: "Contrapicado acentuado",
+                    directorTip: "Usa a régua lateral para apontar para cima e criar linhas convergentes."
+                ),
+                ShotTemplate(
+                    id: "arch-3",
+                    title: "Compressão Urbana 5x",
+                    kind: .medium,
+                    preferredMode: .photo,
+                    recommendedLens: 5.0,
+                    targetDurationSeconds: 0,
+                    targetDistanceRange: 4.0...10.0,
+                    targetPitchRange: -4...10,
+                    maxRollDegrees: 1.5,
+                    movementHint: "Mão firme / 5x",
+                    directorTip: "Isola janelas, telhados ou monumentos ao longe com 5x."
+                ),
+                ShotTemplate(
+                    id: "arch-4",
+                    title: "Luz, Sombra & Detalhe",
+                    kind: .detail,
+                    preferredMode: .photo,
+                    recommendedLens: 2.0,
+                    targetDurationSeconds: 0,
+                    targetDistanceRange: 1.0...3.5,
+                    targetPitchRange: -12...15,
+                    maxRollDegrees: 2.0,
+                    movementHint: "Baixa EV -0.5 nas sombras",
+                    directorTip: "Usa o EV negativo na gaveta PRO para sombras dramáticas e texturas ricas."
+                ),
+                ShotTemplate(
+                    id: "arch-5",
+                    title: "Escala Humana",
+                    kind: .establishing,
+                    preferredMode: .photo,
+                    recommendedLens: 1.0,
+                    targetDurationSeconds: 0,
+                    targetDistanceRange: 3.0...7.0,
+                    targetPitchRange: -4...8,
+                    maxRollDegrees: 1.5,
+                    movementHint: "Pessoa num terço lateral",
+                    directorTip: "Coloca uma pessoa pequena no plano para dar noção real de grandiosidade."
+                )
+            ]
+        ),
+        ScenePack(
             id: "free-mode",
             name: "Modo Livre",
             subtitle: "Qualidade Pro + LiDAR + deteção automática de plano",

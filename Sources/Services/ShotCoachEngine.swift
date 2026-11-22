@@ -127,8 +127,24 @@ enum ShotCoachEngine {
         let combinedScore = (rollScore * 0.25) + (pitchScore * 0.40) + (distanceScore * 0.35)
         let isLocked = rollExcess == 0 && abs(pitchDelta) <= pitchLockTol && abs(distanceDelta ?? 0) <= distLockTol
 
+        if target.preferredMode == .photo && motionPace == .tooFast {
+            return CoachingAdvice(
+                primaryInstruction: "Estabiliza a mão para foto nítida",
+                secondaryHint: "Mantém o iPhone parado 1 segundo antes de fotografar em 48MP.",
+                alignmentScore: min(combinedScore, 0.7),
+                isLocked: false
+            )
+        }
+
         if isLocked {
-            let lockedTitle = isRecording ? "Gravação perfeita — mantém o ritmo" : "Ângulo perfeito — dispara!"
+            let lockedTitle: String
+            if isRecording {
+                lockedTitle = "Gravação perfeita — mantém o ritmo"
+            } else if target.preferredMode == .photo {
+                lockedTitle = lighting == .low ? "Mão firme — fotografa (pouca luz)" : "Enquadramento perfeito — fotografa!"
+            } else {
+                lockedTitle = "Ângulo perfeito — dispara!"
+            }
             return CoachingAdvice(
                 primaryInstruction: lockedTitle,
                 secondaryHint: "\(target.movementHint) • \(target.directorTip)",

@@ -11,8 +11,33 @@ struct ScenePackSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var showBuilder = false
     @State private var searchText = ""
+    @State private var filter: PackFilter = .all
+
+    private enum PackFilter: String, CaseIterable, Identifiable {
+        case all = "Todos"
+        case video = "Vídeo / Reels"
+        case photo = "Fotografia"
+
+        var id: String { rawValue }
+    }
+
+    private func isPhotoPack(_ pack: ScenePack) -> Bool {
+        !pack.shots.isEmpty && pack.shots.allSatisfy { $0.preferredMode == .photo }
+    }
+
+    private func matchesFilter(_ pack: ScenePack) -> Bool {
+        switch filter {
+        case .all:
+            return true
+        case .video:
+            return pack.shots.isEmpty || pack.shots.contains { $0.preferredMode == .video }
+        case .photo:
+            return isPhotoPack(pack)
+        }
+    }
 
     private func matchesSearch(_ pack: ScenePack) -> Bool {
+        guard matchesFilter(pack) else { return false }
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !query.isEmpty else { return true }
         if pack.name.lowercased().contains(query) || pack.subtitle.lowercased().contains(query) {
@@ -29,16 +54,33 @@ struct ScenePackSheet: View {
         presetPacks.filter(matchesSearch)
     }
 
-    private func totalDurationLabel(for pack: ScenePack) -> String? {
+    private func packMetaLabel(for pack: ScenePack) -> String? {
+        guard !pack.shots.isEmpty else { return nil }
+        if isPhotoPack(pack) {
+            return "\(pack.shots.count) fotos • 48MP"
+        }
         let videoShots = pack.shots.filter { $0.preferredMode == .video }
-        guard !videoShots.isEmpty else { return nil }
         let total = videoShots.reduce(0.0) { $0 + $1.targetDurationSeconds }
-        return String(format: "~%.0fs", total)
+        if total > 0 {
+            return String(format: "%d planos • ~%.0fs", pack.shots.count, total)
+        }
+        return "\(pack.shots.count) planos"
     }
 
     var body: some View {
         NavigationStack {
             List {
+                Section {
+                    Picker("Tipo de guião", selection: $filter) {
+                        ForEach(PackFilter.allCases) { option in
+                            Text(option.rawValue).tag(option)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .listRowBackground(Color.clear)
+                    .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+                }
+
                 if !filteredCustomPacks.isEmpty {
                     Section("Os Teus Guiões") {
                         ForEach(filteredCustomPacks) { pack in
@@ -103,11 +145,10 @@ struct ScenePackSheet: View {
 
                         Spacer()
 
-                        if !pack.shots.isEmpty {
-                            let dur = totalDurationLabel(for: pack).map { " • \($0)" } ?? ""
-                            Text("\(pack.shots.count) planos\(dur)")
+                        if let meta = packMetaLabel(for: pack) {
+                            Text(meta)
                                 .font(.caption.monospacedDigit())
-                                .foregroundColor(.secondary)
+                                .foregroundColor(isPhotoPack(pack) ? .cyan : .secondary)
                         }
                     }
 
