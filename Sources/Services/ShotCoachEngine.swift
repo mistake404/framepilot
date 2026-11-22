@@ -78,8 +78,17 @@ enum ShotCoachEngine {
             )
         }
 
-        // 1. Roll score (horizon)
-        let rollExcess = max(0, abs(rollDegrees) - target.maxRollDegrees)
+        // 1. Roll score (horizon) — gracefully relaxed/disabled on steep picado (top-down) & contrapicado
+        let absPitch = abs(pitchDegrees)
+        let effectiveMaxRoll: Double
+        if absPitch >= 42.0 {
+            effectiveMaxRoll = 90.0
+        } else if absPitch >= 20.0 {
+            effectiveMaxRoll = target.maxRollDegrees * 1.8
+        } else {
+            effectiveMaxRoll = target.maxRollDegrees
+        }
+        let rollExcess = max(0, abs(rollDegrees) - effectiveMaxRoll)
         let rollScore = max(0.0, 1.0 - (rollExcess / 12.0))
 
         // 2. Pitch score
@@ -111,7 +120,7 @@ enum ShotCoachEngine {
         }
 
         let combinedScore = (rollScore * 0.25) + (pitchScore * 0.40) + (distanceScore * 0.35)
-        let isLocked = rollExcess == 0 && abs(pitchDelta) <= 2.0 && abs(distanceDelta ?? 0) <= 0.12
+        let isLocked = rollExcess == 0 && abs(pitchDelta) <= 3.5 && abs(distanceDelta ?? 0) <= 0.15
 
         if isLocked {
             let lockedTitle = isRecording ? "Gravação perfeita — mantém o ritmo" : "Ângulo perfeito — dispara!"

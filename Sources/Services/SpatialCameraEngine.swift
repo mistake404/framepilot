@@ -189,6 +189,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     private var hasMotionSample: Bool = false
     private var motionGeneration: UInt = 0
     private var isRecordingFlag: Bool = false
+    private var isFrontCameraFlag: Bool = false
     private var currentThermalState: ProcessInfo.ThermalState = ProcessInfo.processInfo.thermalState
 
     private var lastVisionTimestamp: TimeInterval = 0
@@ -644,6 +645,9 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         let high = Double(device.maxAvailableVideoZoomFactor) / wideZoomFactor
         let lenses = [0.5, 1.0, 2.0, 5.0].filter { $0 >= low && $0 <= high }
         let lens = Double(device.videoZoomFactor) / wideZoomFactor
+        sensorLock.lock()
+        isFrontCameraFlag = (device.position == .front)
+        sensorLock.unlock()
         DispatchQueue.main.async {
             self.hudDevice = device
             self.cameraPosition = device.position
@@ -1273,15 +1277,19 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
             let g = motion.gravity
             let r = motion.rotationRate
 
-            let pitchDeg = atan2(g.z, hypot(g.x, g.y)) * 180.0 / .pi
+            let xyMag = hypot(g.x, g.y)
+            let rawPitchDeg = atan2(g.z, xyMag) * 180.0 / .pi
             let rawRollDeg = atan2(g.x, -g.y) * 180.0 / .pi
             let nearestRightAngle = (rawRollDeg / 90.0).rounded() * 90.0
-            let horizonErrorDeg = rawRollDeg - nearestRightAngle
+            // Prevent gimbal-lock roll jitter when pointing steeply down (picado/overhead) or up (contrapicado)
+            let rollStability = max(0.0, min(1.0, (xyMag - 0.30) / 0.35))
+            let horizonErrorDeg = (rawRollDeg - nearestRightAngle) * rollStability
             let angularSpeedDeg = sqrt(r.x * r.x + r.y * r.y + r.z * r.z) * 180.0 / .pi
 
             self.sensorLock.lock()
             defer { self.sensorLock.unlock() }
             guard generation == self.motionGeneration else { return }
+            let pitchDeg = self.isFrontCameraFlag ? -rawPitchDeg : rawPitchDeg
             if self.hasMotionSample {
                 let alpha = 0.28
                 self.smoothedPitchDegrees += alpha * (pitchDeg - self.smoothedPitchDegrees)

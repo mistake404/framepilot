@@ -59,6 +59,19 @@ struct DirectorHUDView: View {
             )
             .allowsHitTesting(false)
 
+            // Live Vertical Pitch Gauge (Picado / Contrapicado visual guide)
+            if let shot = activeShot {
+                HStack {
+                    Spacer()
+                    PitchGaugeOverlay(
+                        pitchDegrees: telemetry.pitchDegrees,
+                        targetRange: shot.targetPitchRange
+                    )
+                    .padding(.trailing, 10)
+                }
+                .allowsHitTesting(false)
+            }
+
             // Coaching pill + Motion Pace badge + Rack Focus indicator
             VStack(spacing: 6) {
                 Spacer().frame(height: 68)
@@ -502,5 +515,88 @@ private struct CoachingBanner: View {
                         .stroke(advice.isLocked ? Color.green.opacity(0.75) : Color.white.opacity(0.18), lineWidth: 1)
                 )
         )
+    }
+}
+
+/// Visual vertical pitch gauge on the right edge so Picado (-) and Contrapicado (+) angles are effortless to hit.
+private struct PitchGaugeOverlay: View {
+    let pitchDegrees: Double
+    let targetRange: ClosedRange<Double>
+
+    private let minDeg: Double = -90.0
+    private let maxDeg: Double = 60.0
+    private let trackHeight: CGFloat = 156
+
+    private var isInTarget: Bool {
+        pitchDegrees >= (targetRange.lowerBound - 3.5) && pitchDegrees <= (targetRange.upperBound + 3.5)
+    }
+
+    private var needsTiltUp: Bool {
+        pitchDegrees < targetRange.lowerBound - 3.5
+    }
+
+    private var needsTiltDown: Bool {
+        pitchDegrees > targetRange.upperBound + 3.5
+    }
+
+    private func yPosition(for degrees: Double) -> CGFloat {
+        let clamped = max(minDeg, min(maxDeg, degrees))
+        let normalized = (clamped - minDeg) / (maxDeg - minDeg) // 0 = bottom (-90), 1 = top (+60)
+        return trackHeight * CGFloat(1.0 - normalized)
+    }
+
+    var body: some View {
+        let topY = yPosition(for: targetRange.upperBound)
+        let bottomY = yPosition(for: targetRange.lowerBound)
+        let targetBandHeight = max(12, bottomY - topY)
+        let currentY = yPosition(for: pitchDegrees)
+        let horizonY = yPosition(for: 0)
+
+        VStack(spacing: 5) {
+            // Directional arrow hint (up = contrapicado, down = picado)
+            Image(systemName: isInTarget ? "checkmark.circle.fill" : (needsTiltUp ? "chevron.up" : "chevron.down"))
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(isInTarget ? .green : .yellow)
+
+            ZStack(alignment: .top) {
+                // Background track
+                Capsule()
+                    .fill(Color.black.opacity(0.55))
+                    .frame(width: 10, height: trackHeight)
+                    .overlay(
+                        Capsule().stroke(Color.white.opacity(0.18), lineWidth: 0.8)
+                    )
+
+                // 0° horizon reference tick
+                Rectangle()
+                    .fill(Color.white.opacity(0.45))
+                    .frame(width: 14, height: 1)
+                    .offset(y: horizonY)
+
+                // Target pitch zone band
+                Capsule()
+                    .fill(isInTarget ? Color.green.opacity(0.85) : Color.cyan.opacity(0.65))
+                    .frame(width: 10, height: targetBandHeight)
+                    .offset(y: topY)
+
+                // Current pitch live indicator
+                Circle()
+                    .fill(isInTarget ? Color.green : Color.yellow)
+                    .frame(width: 14, height: 14)
+                    .overlay(
+                        Circle().stroke(Color.black.opacity(0.75), lineWidth: 1.5)
+                    )
+                    .shadow(color: (isInTarget ? Color.green : Color.yellow).opacity(0.7), radius: 4)
+                    .offset(y: max(0, min(trackHeight - 14, currentY - 7)))
+            }
+            .frame(width: 24, height: trackHeight)
+
+            Text("\(Int(pitchDegrees.rounded()))°")
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundColor(isInTarget ? .green : .white)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(Color.black.opacity(0.62)))
+        }
     }
 }
