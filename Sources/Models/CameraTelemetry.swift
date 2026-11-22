@@ -46,6 +46,21 @@ enum OverlayMode: String, CaseIterable {
     }
 }
 
+struct FocusMark: Equatable, Identifiable {
+    var id: String { label }
+    let label: String // "A" or "B"
+    let distanceMeters: Double?
+    let lensPosition: Float // 0.0 ... 1.0
+
+    var formattedDistance: String {
+        guard let d = distanceMeters else { return "\(Int(lensPosition * 100))%" }
+        if d < 1.0 {
+            return "\(Int((d * 100).rounded())) cm"
+        }
+        return String(format: "%.1f m", d)
+    }
+}
+
 enum LightingCondition: String {
     case low = "Luz baixa"
     case balanced = "Luz equilibrada"
@@ -91,6 +106,14 @@ struct CameraTelemetry {
     var motionPace: MotionPace = .still
     var detectedFaceRect: CGRect? // normalized top-left 0...1
     var advice: CoachingAdvice = .idle
+    var focusMarkA: FocusMark?
+    var focusMarkB: FocusMark?
+    var isRackFocusing: Bool = false
+    var rackFocusProgress: Double? // 0.0 ... 1.0 during transition
+    var rackFocusTargetLabel: String?
+    var isDollyActive: Bool = false
+    var dollyProgress: Double = 0.0
+    var dollyAlignmentScore: Double = 0.0
 
     var formattedDistance: String {
         guard let d = lidarDistanceMeters else { return "-- m" }

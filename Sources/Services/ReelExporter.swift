@@ -6,6 +6,7 @@ import UIKit
 
 enum ReelLook: String, CaseIterable, Identifiable {
     case original = "Original"
+    case film35mm = "35mm Película"
     case cinemaWarm = "Cinema Quente"
     case moody = "Moody"
     case mono = "P&B"
@@ -41,8 +42,12 @@ enum ReelExporter {
         }
     }
 
-    /// Stitches recorded session video clips in storyboard order, applies optional cinematic color look, and saves to Photos.
-    static func exportReel(videoURLs: [URL], look: ReelLook = .original) async throws {
+    /// Stitches recorded session video clips in storyboard order, applies optional cinematic color look, inserts transition sound design whooshes, and saves to Photos.
+    static func exportReel(
+        videoURLs: [URL],
+        look: ReelLook = .original,
+        includeSoundDesign: Bool = true
+    ) async throws {
         guard !videoURLs.isEmpty else {
             throw ExportError.noVideoClips
         }
@@ -62,8 +67,9 @@ enum ReelExporter {
 
         var cursor = CMTime.zero
         var didSetTransform = false
+        var transitionCutTimes: [CMTime] = []
 
-        for url in videoURLs {
+        for (index, url) in videoURLs.enumerated() {
             let asset = AVURLAsset(url: url)
             let duration = try await asset.load(.duration)
             guard duration.isNumeric && duration.seconds > 0.05 else { continue }
@@ -84,10 +90,36 @@ enum ReelExporter {
             }
 
             cursor = CMTimeAdd(cursor, duration)
+            if index < videoURLs.count - 1 {
+                transitionCutTimes.append(cursor)
+            }
         }
 
         guard cursor.seconds > 0.05 else {
             throw ExportError.noVideoClips
+        }
+
+        // Insert synthesized cinematic whooshes at transition cuts
+        if includeSoundDesign && !transitionCutTimes.isEmpty,
+           let whooshURL = createCinematicWhooshAudioFile() {
+            defer { try? FileManager.default.removeItem(at: whooshURL) }
+            let whooshAsset = AVURLAsset(url: whooshURL)
+            if let whooshTrack = composition.addMutableTrack(
+                withMediaType: .audio,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            ), let sourceWhooshAudio = try? await whooshAsset.loadTracks(withMediaType: .audio).first {
+                let whooshDuration = (try? await whooshAsset.load(.duration)) ?? CMTime(seconds: 0.55, preferredTimescale: 44100)
+                let halfLead = CMTime(seconds: 0.26, preferredTimescale: 44100)
+
+                for cutTime in transitionCutTimes {
+                    let insertStart = cutTime > halfLead ? CMTimeSubtract(cutTime, halfLead) : CMTime.zero
+                    try? whooshTrack.insertTimeRange(
+                        CMTimeRange(start: .zero, duration: whooshDuration),
+                        of: sourceWhooshAudio,
+                        at: insertStart
+                    )
+                }
+            }
         }
 
         let outputURL = FileManager.default.temporaryDirectory
@@ -131,10 +163,94 @@ enum ReelExporter {
         try? FileManager.default.removeItem(at: outputURL)
     }
 
+    /// Synthesizes an in-memory 16-bit 44.1kHz mono WAV whoosh sound effect with cubic envelope and sub-bass drop.
+    private static func createCinematicWhooshAudioFile() -> URL? {
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FramePilot-Whoosh-\(UUID().uuidString).wav")
+        let sampleRate: Double = 44100.0
+        let durationSeconds: Double = 0.52
+        let totalSamples = Int(sampleRate * durationSeconds)
+        let numChannels: Int16 = 1
+        let bitsPerSample: Int16 = 16
+        let byteRate = Int32(Int(sampleRate) * Int(numChannels) * Int(bitsPerSample / 8))
+        let blockAlign = Int16(numChannels * (bitsPerSample / 8))
+        let dataSize = Int32(totalSamples * Int(numChannels) * Int(bitsPerSample / 8))
+        let chunkSize = 36 + dataSize
+
+        var data = Data()
+        data.append(contentsOf: [UInt8]("RIFF".utf8))
+        data.append(contentsOf: withUnsafeBytes(of: chunkSize.littleEndian) { Array($0) })
+        data.append(contentsOf: [UInt8]("WAVE".utf8))
+        data.append(contentsOf: [UInt8]("fmt ".utf8))
+        let subchunk1Size: Int32 = 16
+        let audioFormat: Int16 = 1
+        data.append(contentsOf: withUnsafeBytes(of: subchunk1Size.littleEndian) { Array($0) })
+        data.append(contentsOf: withUnsafeBytes(of: audioFormat.littleEndian) { Array($0) })
+        data.append(contentsOf: withUnsafeBytes(of: numChannels.littleEndian) { Array($0) })
+        data.append(contentsOf: withUnsafeBytes(of: Int32(sampleRate).littleEndian) { Array($0) })
+        data.append(contentsOf: withUnsafeBytes(of: byteRate.littleEndian) { Array($0) })
+        data.append(contentsOf: withUnsafeBytes(of: blockAlign.littleEndian) { Array($0) })
+        data.append(contentsOf: withUnsafeBytes(of: bitsPerSample.littleEndian) { Array($0) })
+        data.append(contentsOf: [UInt8]("data".utf8))
+        data.append(contentsOf: withUnsafeBytes(of: dataSize.littleEndian) { Array($0) })
+
+        var lastFilter: Double = 0.0
+        for i in 0..<totalSamples {
+            let t = Double(i) / sampleRate
+            let normT = t / durationSeconds
+            let envelope = pow(sin(normT * .pi), 2.2)
+
+            let white = Double.random(in: -1.0...1.0)
+            let filteredNoise = 0.18 * white + 0.82 * lastFilter
+            lastFilter = filteredNoise
+
+            // Sub-bass sweep: 88Hz down to 42Hz
+            let freq = 88.0 - (46.0 * normT)
+            let sub = sin(2.0 * .pi * freq * t) * 0.42
+
+            let sample = (filteredNoise * 0.65 + sub) * envelope * 0.92
+            let clamped = max(-1.0, min(1.0, sample))
+            let int16 = Int16(clamped * 32767.0)
+            data.append(contentsOf: withUnsafeBytes(of: int16.littleEndian) { Array($0) })
+        }
+
+        do {
+            try data.write(to: tempURL)
+            return tempURL
+        } catch {
+            return nil
+        }
+    }
+
     private static func applyLook(_ look: ReelLook, to image: CIImage) -> CIImage {
         switch look {
         case .original:
             return image
+        case .film35mm:
+            // 35mm Analog Film emulation: warm highlight roll-off, lifted rich blacks, subtle soft-light grain
+            let warmed = image.applyingFilter("CITemperatureAndTint", parameters: [
+                "inputNeutral": CIVector(x: 6500, y: 0),
+                "inputTargetNeutral": CIVector(x: 5800, y: 5)
+            ])
+            let filmCurve = warmed.applyingFilter("CIColorControls", parameters: [
+                kCIInputSaturationKey: 1.06,
+                kCIInputContrastKey: 1.11,
+                kCIInputBrightnessKey: 0.02
+            ])
+            // Subtle analog grain via random generator
+            if let noise = CIFilter(name: "CIRandomGenerator")?.outputImage?
+                .cropped(to: image.extent)
+                .applyingFilter("CIColorMatrix", parameters: [
+                    "inputRVector": CIVector(x: 0.33, y: 0.33, z: 0.33, w: 0),
+                    "inputGVector": CIVector(x: 0.33, y: 0.33, z: 0.33, w: 0),
+                    "inputBVector": CIVector(x: 0.33, y: 0.33, z: 0.33, w: 0),
+                    "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0.065)
+                ]) {
+                return noise.applyingFilter("CISoftLightBlendMode", parameters: [
+                    kCIInputBackgroundImageKey: filmCurve
+                ])
+            }
+            return filmCurve
         case .cinemaWarm:
             // Warm highlights + subtle film contrast
             let warmed = image.applyingFilter("CITemperatureAndTint", parameters: [

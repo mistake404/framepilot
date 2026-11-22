@@ -6,6 +6,7 @@ struct ContentView: View {
     @State private var showPackSheet = false
     @State private var showStoryboardSheet = false
     @State private var showExposureSlider = false
+    @State private var showRackFocusBar = false
     @State private var showTeleprompter = false
     @State private var showTeleprompterEditor = false
     @AppStorage("framepilot.teleprompter.text") private var teleprompterText: String = "3 segundos para prender atenção: mostra primeiro o resultado final, depois explica o passo a passo com energia!"
@@ -140,6 +141,82 @@ struct ContentView: View {
                     .padding(.bottom, 8)
                 }
 
+                // Hollywood Rack Focus bar when toggled or active
+                if showRackFocusBar || engine.focusMarkA != nil || engine.focusMarkB != nil {
+                    HStack(spacing: 8) {
+                        // Mark A
+                        Button {
+                            engine.setFocusMarkA()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text("Ponto A")
+                                    .font(.system(size: 10, weight: .bold))
+                                if let a = engine.focusMarkA {
+                                    Text(a.formattedDistance)
+                                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                }
+                            }
+                            .foregroundColor(engine.focusMarkA != nil ? .yellow : .white)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 6)
+                            .background(Capsule().fill(Color.black.opacity(0.68)))
+                        }
+
+                        // Trigger [ A ➔ B ]
+                        Button {
+                            let next = (engine.focusMarkB != nil && engine.hudStore.telemetry.rackFocusTargetLabel != "B") ? "B" : "A"
+                            engine.triggerRackFocus(to: next)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "camera.aperture")
+                                    .font(.system(size: 11, weight: .bold))
+                                Text("Rack A➔B")
+                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            }
+                            .foregroundColor(.black)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(
+                                Capsule().fill(
+                                    (engine.focusMarkA != nil && engine.focusMarkB != nil) ? Color.yellow : Color.gray.opacity(0.5)
+                                )
+                            )
+                        }
+                        .disabled(engine.focusMarkA == nil || engine.focusMarkB == nil || engine.isRackFocusing)
+
+                        // Mark B
+                        Button {
+                            engine.setFocusMarkB()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text("Ponto B")
+                                    .font(.system(size: 10, weight: .bold))
+                                if let b = engine.focusMarkB {
+                                    Text(b.formattedDistance)
+                                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                }
+                            }
+                            .foregroundColor(engine.focusMarkB != nil ? .yellow : .white)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 6)
+                            .background(Capsule().fill(Color.black.opacity(0.68)))
+                        }
+
+                        // Clear
+                        if engine.focusMarkA != nil || engine.focusMarkB != nil {
+                            Button {
+                                engine.clearFocusMarks()
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.white.opacity(0.65))
+                                    .font(.system(size: 14))
+                            }
+                        }
+                    }
+                    .padding(.bottom, 6)
+                    .transition(.opacity)
+                }
+
                 // Pro Controls strip: Lenses + EV + Flash/Quality + Timer
                 HStack(spacing: 7) {
                     if engine.availableLenses.count > 1 {
@@ -206,6 +283,40 @@ struct ContentView: View {
                                 .background(Capsule().fill(Color.black.opacity(0.5)))
                         }
                         .disabled(engine.isRecording)
+                    }
+
+                    // Hollywood Rack Focus toggle
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            showRackFocusBar.toggle()
+                        }
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "camera.aperture")
+                                .font(.system(size: 11, weight: .semibold))
+                            Text("Rack")
+                                .font(.system(size: 10, weight: .bold))
+                        }
+                        .foregroundColor(showRackFocusBar || engine.focusMarkA != nil ? .yellow : .white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(Color.black.opacity(0.5)))
+                    }
+
+                    // 3D Virtual Dolly toggle
+                    Button {
+                        engine.toggleVirtualDolly()
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "point.3.filled.connected.trianglepath.dotted")
+                                .font(.system(size: 11, weight: .bold))
+                            Text("Dolly")
+                                .font(.system(size: 10, weight: .bold))
+                        }
+                        .foregroundColor(engine.isVirtualDollyActive ? .cyan : .white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(Color.black.opacity(0.5)))
                     }
 
                     // Aspect Mask (9:16 / 4:5 / 16:9)

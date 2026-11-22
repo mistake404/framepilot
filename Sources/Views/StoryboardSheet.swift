@@ -5,7 +5,7 @@ struct StoryboardSheet: View {
     @ObservedObject var engine: SpatialCameraEngine
     @Environment(\.dismiss) private var dismiss
 
-    @State private var selectedLook: ReelLook = .original
+    @State private var selectedLook: ReelLook = .film35mm
     @State private var previewVideoURL: URL?
 
     var body: some View {
@@ -100,8 +100,15 @@ struct StoryboardSheet: View {
                         }
                     }
 
-                    // Cinematic Look Picker + 1-Click Auto-Edit Reel Export Footer
-                    VStack(spacing: 10) {
+                    // Cinematic Look Picker + Sound Design Toggle + 1-Click Auto-Edit Reel Export Footer
+                    VStack(spacing: 12) {
+                        HStack {
+                            Text("Paleta de Cinema:")
+                                .font(.caption.bold())
+                                .foregroundColor(.secondary)
+                            Spacer()
+                        }
+
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 8) {
                                 ForEach(ReelLook.allCases) { look in
@@ -120,6 +127,16 @@ struct StoryboardSheet: View {
                                 }
                             }
                         }
+
+                        Toggle(isOn: $engine.includeSoundDesign) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "waveform.badge.plus")
+                                    .foregroundColor(.cyan)
+                                Text("Sound Design (Whooshes nas transições)")
+                                    .font(.caption.bold())
+                            }
+                        }
+                        .tint(.cyan)
 
                         Button {
                             engine.exportSessionReel(look: selectedLook)

@@ -100,6 +100,15 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     @Published var exposureBias: Float = 0.0
     @Published var focusIndicatorPoint: CGPoint?
     @Published var isAEAFLocked: Bool = false
+    @Published var focusMarkA: FocusMark?
+    @Published var focusMarkB: FocusMark?
+    @Published var isRackFocusing: Bool = false
+    @Published var isVirtualDollyActive: Bool = false
+    @Published var includeSoundDesign: Bool = true
+
+    private var rackFocusTimer: DispatchSourceTimer?
+    private var currentRackFocusProgress: Double?
+    private var currentRackFocusTarget: String?
 
     private let sessionQueue = DispatchQueue(label: "com.framepilot.session", qos: .userInitiated)
     private let depthQueue = DispatchQueue(label: "com.framepilot.depth", qos: .utility)
@@ -818,12 +827,17 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         isExportingReel = true
         Task {
             do {
-                try await ReelExporter.exportReel(videoURLs: orderedURLs, look: look)
+                try await ReelExporter.exportReel(
+                    videoURLs: orderedURLs,
+                    look: look,
+                    includeSoundDesign: self.includeSoundDesign
+                )
                 await MainActor.run {
                     self.isExportingReel = false
                     self.notificationFeedback.notificationOccurred(.success)
                     let lookNote = look == .original ? "" : " • \(look.rawValue)"
-                    self.showToast("Reel montado (\(orderedURLs.count) planos\(lookNote))!")
+                    let sfxNote = self.includeSoundDesign && orderedURLs.count > 1 ? " + SFX" : ""
+                    self.showToast("Reel montado (\(orderedURLs.count) planos\(lookNote)\(sfxNote))!")
                 }
             } catch {
                 await MainActor.run {
@@ -832,6 +846,128 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
                 }
             }
         }
+    }
+
+    func setFocusMarkA() {
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.videoDevice else { return }
+            let pos = device.lensPosition
+            let dist = self.smoothedDistanceMeters
+            let mark = FocusMark(label: "A", distanceMeters: dist, lensPosition: pos)
+            DispatchQueue.main.async {
+                self.focusMarkA = mark
+                self.impactFeedback.impactOccurred()
+                self.showToast("Ponto A marcado (\(mark.formattedDistance))")
+            }
+        }
+    }
+
+    func setFocusMarkB() {
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.videoDevice else { return }
+            let pos = device.lensPosition
+            let dist = self.smoothedDistanceMeters
+            let mark = FocusMark(label: "B", distanceMeters: dist, lensPosition: pos)
+            DispatchQueue.main.async {
+                self.focusMarkB = mark
+                self.impactFeedback.impactOccurred()
+                self.showToast("Ponto B marcado (\(mark.formattedDistance))")
+            }
+        }
+    }
+
+    func clearFocusMarks() {
+        focusMarkA = nil
+        focusMarkB = nil
+        isRackFocusing = false
+        rackFocusTimer?.cancel()
+        rackFocusTimer = nil
+        currentRackFocusProgress = nil
+        currentRackFocusTarget = nil
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.videoDevice else { return }
+            do {
+                try device.lockForConfiguration()
+                if device.isFocusModeSupported(.continuousAutoFocus) {
+                    device.focusMode = .continuousAutoFocus
+                }
+                device.unlockForConfiguration()
+            } catch {}
+        }
+        showToast("Rack Focus reposto em Auto")
+    }
+
+    func triggerRackFocus(to target: String, duration: Double = 1.2) {
+        guard !isRackFocusing else { return }
+        guard let targetMark = (target == "A" ? focusMarkA : focusMarkB) else {
+            showToast("Marca os pontos A e B primeiro")
+            return
+        }
+
+        isRackFocusing = true
+        currentRackFocusTarget = target
+        impactFeedback.impactOccurred()
+
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.videoDevice else { return }
+            guard device.isLockingFocusWithCustomLensPositionSupported else {
+                DispatchQueue.main.async {
+                    self.isRackFocusing = false
+                    self.showToast("Controlo manual de foco indisponível nesta lente")
+                }
+                return
+            }
+
+            let startLens = device.lensPosition
+            let endLens = targetMark.lensPosition
+            let steps = 60
+            let stepInterval = duration / Double(steps)
+            var currentStep = 0
+
+            self.rackFocusTimer?.cancel()
+            let timer = DispatchSource.makeTimerSource(queue: self.sessionQueue)
+            timer.schedule(deadline: .now(), repeating: .milliseconds(Int(stepInterval * 1000.0)))
+
+            timer.setEventHandler { [weak self] in
+                guard let self, let dev = self.videoDevice else {
+                    timer.cancel()
+                    return
+                }
+                currentStep += 1
+                let t = min(1.0, Double(currentStep) / Double(steps))
+                // Smoothstep easing
+                let ease = t * t * (3.0 - 2.0 * t)
+                let currentPos = startLens + Float(ease) * (endLens - startLens)
+
+                do {
+                    try dev.lockForConfiguration()
+                    dev.setFocusModeLocked(lensPosition: currentPos, completionHandler: nil)
+                    dev.unlockForConfiguration()
+                } catch {}
+
+                self.currentRackFocusProgress = ease
+
+                if currentStep >= steps {
+                    timer.cancel()
+                    self.rackFocusTimer = nil
+                    self.currentRackFocusProgress = nil
+                    self.currentRackFocusTarget = nil
+                    DispatchQueue.main.async {
+                        self.isRackFocusing = false
+                        self.notificationFeedback.notificationOccurred(.success)
+                        self.showToast("Foco travado no Ponto \(target)")
+                    }
+                }
+            }
+            self.rackFocusTimer = timer
+            timer.resume()
+        }
+    }
+
+    func toggleVirtualDolly() {
+        isVirtualDollyActive.toggle()
+        impactFeedback.impactOccurred()
+        showToast(isVirtualDollyActive ? "Dolly Holográfico 3D Ativo" : "Dolly Desativado")
     }
 
     private func sessionClipURL(for shotId: String) -> URL {
@@ -949,6 +1085,20 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
             next.detectedShotKind = detected
             next.detectedFaceRect = faceRect
             next.advice = advice
+            next.focusMarkA = self.focusMarkA
+            next.focusMarkB = self.focusMarkB
+            next.isRackFocusing = self.isRackFocusing
+            next.rackFocusProgress = self.currentRackFocusProgress
+            next.rackFocusTargetLabel = self.currentRackFocusTarget
+            next.isDollyActive = self.isVirtualDollyActive
+            if self.isVirtualDollyActive {
+                if let targetSec = self.activeShot?.targetDurationSeconds, targetSec > 0 {
+                    next.dollyProgress = min(1.0, self.recordingElapsed / targetSec)
+                } else {
+                    next.dollyProgress = 0.5
+                }
+                next.dollyAlignmentScore = (motionPace == .cinematic) ? 0.95 : (motionPace == .still ? 0.5 : 0.2)
+            }
             self.hudStore.telemetry = next
 
             if advice.isLocked && !self.wasLocked {

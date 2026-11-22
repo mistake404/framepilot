@@ -39,6 +39,17 @@ struct DirectorHUDView: View {
                 .allowsHitTesting(false)
             }
 
+            // Holographic 3D Virtual Dolly Rail
+            if telemetry.isDollyActive {
+                VirtualDollyHologramOverlay(
+                    shotKind: activeShot?.kind ?? .orbit,
+                    movementHint: activeShot?.movementHint ?? "Deslize lateral",
+                    progress: telemetry.dollyProgress,
+                    alignmentScore: telemetry.dollyAlignmentScore
+                )
+                .allowsHitTesting(false)
+            }
+
             // Center spatial reticle + artificial horizon (EMA-smoothed at 30Hz)
             CenterReticleView(
                 rollDegrees: telemetry.rollDegrees,
@@ -48,7 +59,7 @@ struct DirectorHUDView: View {
             )
             .allowsHitTesting(false)
 
-            // Coaching pill + Motion Pace badge
+            // Coaching pill + Motion Pace badge + Rack Focus indicator
             VStack(spacing: 6) {
                 Spacer().frame(height: 68)
 
@@ -65,11 +76,199 @@ struct DirectorHUDView: View {
                     )
                 }
 
+                // Live Rack Focus active transition banner
+                if let progress = telemetry.rackFocusProgress, let target = telemetry.rackFocusTargetLabel {
+                    RackFocusActivePill(targetLabel: target, progress: progress)
+                        .transition(.scale.combined(with: .opacity))
+                }
+
                 Spacer()
             }
             .allowsHitTesting(false)
         }
     }
+}
+
+private struct VirtualDollyHologramOverlay: View {
+    let shotKind: ShotKind
+    let movementHint: String
+    let progress: Double
+    let alignmentScore: Double
+
+    var isLocked: Bool {
+        alignmentScore > 0.8
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let h = geo.size.height
+
+            ZStack {
+                // Curved Holographic Rail
+                DollyRailShape(kind: shotKind)
+                    .stroke(
+                        LinearGradient(
+                            colors: [
+                                isLocked ? Color.green.opacity(0.85) : Color.cyan.opacity(0.75),
+                                isLocked ? Color.emeraldGlaze : Color.yellow.opacity(0.65)
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        ),
+                        style: StrokeStyle(lineWidth: 3.0, lineCap: .round, dash: [8, 6])
+                    )
+                    .shadow(color: isLocked ? Color.green.opacity(0.6) : Color.cyan.opacity(0.4), radius: 8)
+
+                // Holographic Glider moving along the track
+                GliderPointView(kind: shotKind, progress: progress, bounds: geo.size, isLocked: isLocked)
+
+                // Dolly telemetry status pill
+                VStack {
+                    Spacer().frame(height: h * 0.70)
+                    HStack(spacing: 6) {
+                        Image(systemName: isLocked ? "lock.shield.fill" : "point.3.filled.connected.trianglepath.dotted")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(isLocked ? .green : .cyan)
+
+                        Text(isLocked ? "DOLLY GIMBAL BLOQUEADO" : "DOLLY 3D • \(movementHint)")
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundColor(.white)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(
+                        Capsule().fill(Color.black.opacity(0.75))
+                            .overlay(Capsule().stroke(isLocked ? Color.green.opacity(0.8) : Color.cyan.opacity(0.5), lineWidth: 1))
+                    )
+                    Spacer()
+                }
+            }
+        }
+    }
+}
+
+private struct DollyRailShape: Shape {
+    let kind: ShotKind
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let w = rect.width
+        let h = rect.height
+
+        switch kind {
+        case .orbit:
+            // Sweeping elliptical camera arc
+            path.addArc(
+                center: CGPoint(x: w / 2, y: h * 0.52),
+                radius: w * 0.38,
+                startAngle: .degrees(160),
+                endAngle: .degrees(20),
+                clockwise: false
+            )
+        case .lowAngle, .highAngle:
+            // Vertical ascending/descending runway
+            path.move(to: CGPoint(x: w / 2, y: h * 0.75))
+            path.addLine(to: CGPoint(x: w / 2, y: h * 0.30))
+        default:
+            // Smooth horizontal motion track
+            path.move(to: CGPoint(x: w * 0.12, y: h * 0.52))
+            path.addQuadCurve(
+                to: CGPoint(x: w * 0.88, y: h * 0.52),
+                control: CGPoint(x: w / 2, y: h * 0.44)
+            )
+        }
+        return path
+    }
+}
+
+private struct GliderPointView: View {
+    let kind: ShotKind
+    let progress: Double
+    let bounds: CGSize
+    let isLocked: Bool
+
+    private var currentPosition: CGPoint {
+        let w = bounds.width
+        let h = bounds.height
+        let p = CGFloat(max(0, min(1, progress)))
+
+        switch kind {
+        case .orbit:
+            let radius = w * 0.38
+            let startDeg: Double = 160
+            let endDeg: Double = 20
+            let angleDeg = startDeg + (endDeg - startDeg) * Double(p)
+            let angleRad = angleDeg * .pi / 180.0
+            let cx = w / 2
+            let cy = h * 0.52
+            return CGPoint(x: cx + radius * CGFloat(cos(angleRad)), y: cy + radius * CGFloat(sin(angleRad)))
+        case .lowAngle, .highAngle:
+            let startY = h * 0.75
+            let endY = h * 0.30
+            return CGPoint(x: w / 2, y: startY + (endY - startY) * p)
+        default:
+            let startX = w * 0.12
+            let endX = w * 0.88
+            let x = startX + (endX - startX) * p
+            let y = h * 0.52 - sin(p * .pi) * (h * 0.08)
+            return CGPoint(x: x, y: y)
+        }
+    }
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(isLocked ? Color.green.opacity(0.35) : Color.cyan.opacity(0.3))
+                .frame(width: 28, height: 28)
+
+            Circle()
+                .stroke(isLocked ? Color.green : Color.cyan, lineWidth: 2)
+                .frame(width: 18, height: 18)
+
+            Circle()
+                .fill(Color.white)
+                .frame(width: 7, height: 7)
+        }
+        .position(currentPosition)
+        .animation(.linear(duration: 0.1), value: progress)
+    }
+}
+
+private struct RackFocusActivePill: View {
+    let targetLabel: String
+    let progress: Double
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "camera.aperture")
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(.yellow)
+
+            Text("Rack Focus ➔ Ponto \(targetLabel)")
+                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                .foregroundColor(.white)
+
+            // Progress bar
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.white.opacity(0.2))
+                    .frame(width: 60, height: 5)
+
+                Capsule()
+                    .fill(Color.yellow)
+                    .frame(width: 60 * CGFloat(max(0, min(1, progress))), height: 5)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Capsule().fill(Color.black.opacity(0.75)))
+        .overlay(Capsule().stroke(Color.yellow.opacity(0.7), lineWidth: 1))
+    }
+}
+
+private extension Color {
+    static let emeraldGlaze = Color(red: 0.1, green: 0.85, blue: 0.45)
 }
 
 private struct AspectMaskOverlay: View {
@@ -132,23 +331,19 @@ private struct ReelsSafeZoneOverlay: View {
             let rightMargin = w * 0.16
 
             ZStack {
-                // Subtle rule-of-thirds inside safe frame
                 RuleOfThirdsGrid()
                     .stroke(Color.white.opacity(0.12), lineWidth: 0.6)
 
-                // Shaded Reels/TikTok right-side interaction icons zone
                 Rectangle()
                     .fill(Color.red.opacity(0.12))
                     .frame(width: rightMargin, height: h - topMargin - bottomMargin)
                     .position(x: w - rightMargin / 2, y: topMargin + (h - topMargin - bottomMargin) / 2)
 
-                // Shaded Reels/TikTok bottom caption & audio zone
                 Rectangle()
                     .fill(Color.red.opacity(0.14))
                     .frame(width: w, height: bottomMargin)
                     .position(x: w / 2, y: h - bottomMargin / 2)
 
-                // Safe zone dashed outline
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .stroke(
                         Color.cyan.opacity(0.55),
