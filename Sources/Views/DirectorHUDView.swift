@@ -524,7 +524,7 @@ private struct PitchGaugeOverlay: View {
     let targetRange: ClosedRange<Double>
 
     private let minDeg: Double = -90.0
-    private let maxDeg: Double = 60.0
+    private let maxDeg: Double = 90.0
     private let trackHeight: CGFloat = 156
 
     private var isInTarget: Bool {
@@ -541,8 +541,8 @@ private struct PitchGaugeOverlay: View {
 
     private func yPosition(for degrees: Double) -> CGFloat {
         let clamped = max(minDeg, min(maxDeg, degrees))
-        let normalized = (clamped - minDeg) / (maxDeg - minDeg) // 0 = bottom (-90), 1 = top (+60)
-        return trackHeight * CGFloat(1.0 - normalized)
+        let normalized = (clamped - minDeg) / (maxDeg - minDeg) // 0 = bottom (-90), 1 = top (+90)
+        return 7 + (trackHeight - 14) * CGFloat(1.0 - normalized)
     }
 
     var body: some View {
@@ -587,7 +587,7 @@ private struct PitchGaugeOverlay: View {
                         Circle().stroke(Color.black.opacity(0.75), lineWidth: 1.5)
                     )
                     .shadow(color: (isInTarget ? Color.green : Color.yellow).opacity(0.7), radius: 4)
-                    .offset(y: max(0, min(trackHeight - 14, currentY - 7)))
+                    .offset(y: currentY - 7)
             }
             .frame(width: 24, height: trackHeight)
 

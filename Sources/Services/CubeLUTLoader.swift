@@ -32,9 +32,11 @@ struct CubeLUTLoader {
         var lower = SIMD3<Float>.zero
         var upper = SIMD3<Float>(repeating: 1)
 
-        let text = text.drop(while: { $0 == "\u{FEFF}" })
-        for line in text.split(whereSeparator: \.isNewline) {
-            let fields = line.prefix(while: { $0 != "#" }).split(whereSeparator: \.isWhitespace)
+        var remaining = text.drop(while: { $0 == "\u{FEFF}" })
+        while !remaining.isEmpty {
+            let line = remaining.prefix(while: { !$0.isNewline })
+            remaining = remaining[line.endIndex...].dropFirst()
+            let fields = line.prefix(while: { $0 != "#" }).split(maxSplits: 4, whereSeparator: \.isWhitespace)
             guard let key = fields.first else { continue }
             switch key {
             case "TITLE":

@@ -120,6 +120,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     @Published var includeSoundDesign: Bool = true
     @Published var includeDynamicCaptions: Bool = false
     @Published var editedTranscriptions: [URL: CaptionService.Transcription] = [:]
+    private var captionPreparation: Task<Void, Never>?
     @Published var isPreparingCaptions: Bool = false
     @Published private(set) var selectedMusicURL: URL?
     @Published private(set) var isImportingMusic = false
@@ -161,6 +162,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     private var videoDevice: AVCaptureDevice?
     private var videoInput: AVCaptureDeviceInput?
     private var wideZoomFactor: Double = 1.0
+    private var pinchLensRange = 1.0...1.0
     private var pinchStartLens: Double = 1.0
     private let photoOutput = AVCapturePhotoOutput()
     private let movieOutput = AVCaptureMovieFileOutput()
@@ -654,11 +656,15 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         let lenses = [0.5, 1.0, 2.0, 5.0].filter { $0 >= low && $0 <= high }
         let lens = Double(device.videoZoomFactor) / wideZoomFactor
         sensorLock.lock()
-        isFrontCameraFlag = (device.position == .front)
+        if isFrontCameraFlag != (device.position == .front) {
+            smoothedPitchDegrees = -smoothedPitchDegrees
+            isFrontCameraFlag = device.position == .front
+        }
         sensorLock.unlock()
         DispatchQueue.main.async {
             self.hudDevice = device
             self.cameraPosition = device.position
+            self.pinchLensRange = low...high
             self.availableLenses = lenses.isEmpty ? [lens] : lenses
             self.activeLens = lens
             if switched {
@@ -790,8 +796,8 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
             return
         }
         guard state == .changed, scale.isFinite, scale > 0 else { return }
-        let minLens = availableLenses.first ?? 0.5
-        let maxLens = max(availableLenses.last ?? 5.0, 10.0)
+        let minLens = pinchLensRange.lowerBound
+        let maxLens = min(pinchLensRange.upperBound, max(availableLenses.last ?? 5.0, 10.0))
         let target = max(minLens, min(maxLens, pinchStartLens * Double(scale)))
         activeLens = target
 
@@ -1059,25 +1065,23 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         guard !missing.isEmpty else { return }
 
         isPreparingCaptions = true
-        Task {
-            guard let recognizer = await CaptionService.localRecognizer() else {
-                await MainActor.run {
+        captionPreparation = Task { @MainActor in
+            defer {
+                if !Task.isCancelled {
                     self.isPreparingCaptions = false
-                    self.showToast("Reconhecimento de voz indisponível")
+                    self.captionPreparation = nil
                 }
+            }
+            guard let recognizer = await CaptionService.localRecognizer() else {
+                if !Task.isCancelled { self.showToast("Reconhecimento de voz indisponível") }
                 return
             }
-            var results: [URL: CaptionService.Transcription] = [:]
             for url in missing {
+                guard !Task.isCancelled else { return }
                 if let t = await CaptionService.transcribeClip(url, recognizer: recognizer) {
-                    results[url] = t
+                    guard !Task.isCancelled else { return }
+                    self.editedTranscriptions[url] = t
                 }
-            }
-            await MainActor.run {
-                for (url, transcription) in results {
-                    self.editedTranscriptions[url] = transcription
-                }
-                self.isPreparingCaptions = false
             }
         }
     }
@@ -1292,7 +1296,15 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         return clipDirectory.appendingPathComponent("\(UUID().uuidString).mov")
     }
 
+    private func cancelCaptionPreparation() {
+        captionPreparation?.cancel()
+        captionPreparation = nil
+        isPreparingCaptions = false
+    }
+
     private func clearSessionFiles() {
+        cancelCaptionPreparation()
+        editedTranscriptions.removeAll()
         try? FileManager.default.removeItem(at: clipDirectory)
     }
 
@@ -1733,6 +1745,8 @@ extension SpatialCameraEngine: AVCaptureFileOutputRecordingDelegate {
         guard let shot = captureContext, shot.generation == packGeneration else { return }
         if let preview { ghostImage = preview }
         if let old = sessionTakes[shot.id]?.fileURL, old != url {
+            cancelCaptionPreparation()
+            editedTranscriptions.removeValue(forKey: old)
             try? FileManager.default.removeItem(at: old)
         }
         sessionTakes[shot.id] = SessionTake(shotId: shot.id, shotTitle: shot.title, isVideo: url != nil,

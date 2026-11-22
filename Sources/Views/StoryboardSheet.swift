@@ -212,7 +212,7 @@ struct StoryboardSheet: View {
                         Spacer()
                         if engine.isPreparingCaptions {
                             ProgressView()
-                        } else if !engine.editedTranscriptions.isEmpty {
+                        } else if engine.editedTranscriptions.count == engine.recordedVideoCount {
                             Text("Pronto")
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(.green)
@@ -427,7 +427,7 @@ private struct CaptionEditorSheet: View {
                                     ForEach(transcription.words.indices, id: \.self) { wordIndex in
                                         let word = transcription.words[wordIndex]
                                         HStack(spacing: 10) {
-                                            Text(String(format: "%.1fs", word.start))
+                                            Text(String(format: "%.1fs", word.start + transcription.sourceOrigin))
                                                 .font(.caption.monospacedDigit())
                                                 .foregroundStyle(.secondary)
                                                 .frame(width: 40, alignment: .leading)
@@ -467,7 +467,9 @@ private struct CaptionEditorSheet: View {
                                         }
                                     }
                                 } else {
-                                    Text("Sem fala detetada neste plano.")
+                                    Text(engine.editedTranscriptions[item.url] == nil
+                                         ? "Transcrição indisponível para este plano."
+                                         : "Sem fala detetada neste plano.")
                                         .font(.footnote)
                                         .foregroundStyle(.secondary)
                                 }
