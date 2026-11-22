@@ -33,6 +33,11 @@ struct SessionTake: Identifiable {
     let durationSeconds: Double
 }
 
+struct ClipTrim: Equatable {
+    var startSeconds: Double
+    var endSeconds: Double
+}
+
 enum ReelExporter {
     enum ExportError: LocalizedError {
         case noVideoClips
@@ -64,7 +69,8 @@ enum ReelExporter {
         transition: ReelTransition = .cut,
         removeSilences: Bool = false,
         customLUTURL: URL? = nil,
-        precomputedTranscriptions: [URL: CaptionService.Transcription] = [:]
+        precomputedTranscriptions: [URL: CaptionService.Transcription] = [:],
+        clipTrims: [URL: ClipTrim] = [:]
     ) async throws {
         guard !videoURLs.isEmpty else {
             throw ExportError.noVideoClips
@@ -93,8 +99,19 @@ enum ReelExporter {
             try Task.checkCancellation()
             let asset = AVURLAsset(url: url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
             guard let video = try await asset.loadTracks(withMediaType: .video).first else { continue }
-            let range = try await video.load(.timeRange)
+            var range = try await video.load(.timeRange)
             guard range.start.isNumeric, range.duration.isNumeric, range.duration.seconds > 0.05 else { continue }
+            if let trim = clipTrims[url] {
+                let total = range.duration.seconds
+                let startSec = max(0, min(trim.startSeconds, total - 0.15))
+                let endSec = max(startSec + 0.15, min(trim.endSeconds, total))
+                if endSec - startSec >= 0.15 {
+                    let timescale: CMTimeScale = 600
+                    let startOffset = CMTime(seconds: startSec, preferredTimescale: timescale)
+                    let trimmedDuration = CMTime(seconds: endSec - startSec, preferredTimescale: timescale)
+                    range = CMTimeRange(start: range.start + startOffset, duration: trimmedDuration)
+                }
+            }
             if preserve4K, renderSize.width == 1080 {
                 let size = try await video.load(.naturalSize)
                 if min(size.width, size.height) >= 2160, max(size.width, size.height) >= 3840 {

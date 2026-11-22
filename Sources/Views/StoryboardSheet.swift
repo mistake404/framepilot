@@ -10,7 +10,15 @@ struct StoryboardSheet: View {
     @State private var selectedLook: ReelLook = .film35mm
     @State private var previewVideoURL: URL?
     @State private var previewPhotoImage: UIImage?
+    @State private var trimTarget: TrimTarget?
     @State private var importKind: ImportKind = .music
+
+    private struct TrimTarget: Identifiable {
+        let id = UUID()
+        let title: String
+        let url: URL
+        let duration: Double
+    }
     @State private var showFilePicker = false
     @State private var showImportError = false
     @State private var showCaptionEditor = false
@@ -93,6 +101,21 @@ struct StoryboardSheet: View {
             .sheet(isPresented: $showCaptionEditor) {
                 CaptionEditorSheet(engine: engine)
             }
+            .sheet(item: $trimTarget) { target in
+                ClipTrimSheet(
+                    title: target.title,
+                    url: target.url,
+                    totalDuration: target.duration,
+                    existingTrim: engine.clipTrims[target.url],
+                    onSave: { newTrim in
+                        if let newTrim {
+                            engine.clipTrims[target.url] = newTrim
+                        } else {
+                            engine.clipTrims.removeValue(forKey: target.url)
+                        }
+                    }
+                )
+            }
             .sheet(isPresented: Binding(
                 get: { previewPhotoImage != nil },
                 set: { if !$0 { previewPhotoImage = nil } }
@@ -139,17 +162,33 @@ struct StoryboardSheet: View {
                         Text("\(index + 1). \(take.shotTitle)")
                             .font(.headline)
                         let duration = take.durationSeconds.formatted(.number.locale(Locale(identifier: "pt_PT")).precision(.fractionLength(1)))
-                        Label(take.isVideo ? "Vídeo · \(duration) s" : "Fotografia captada",
+                        let trimBadge = take.fileURL.flatMap { engine.clipTrims[$0] }.map { t in
+                            String(format: " · aparado %.1f s", max(0, t.endSeconds - t.startSeconds))
+                        } ?? ""
+                        Label(take.isVideo ? "Vídeo · \(duration) s\(trimBadge)" : "Fotografia captada",
                               systemImage: "checkmark.circle.fill")
                             .font(.caption.weight(.medium))
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
 
+                    if let url = take.fileURL, take.isVideo, take.durationSeconds > 0.3 {
+                        Button {
+                            trimTarget = TrimTarget(title: take.shotTitle, url: url, duration: take.durationSeconds)
+                        } label: {
+                            Image(systemName: "scissors")
+                                .frame(minWidth: 36, minHeight: 44)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(engine.isExportingReel)
+                        .accessibilityLabel("Aparar take \(index + 1)")
+                    }
+
                     Button(role: .destructive) {
                         engine.removeFreeModeTake(id: take.shotId)
                     } label: {
                         Image(systemName: "trash")
-                            .frame(minWidth: 44, minHeight: 44)
+                            .frame(minWidth: 36, minHeight: 44)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.borderless)
@@ -158,8 +197,11 @@ struct StoryboardSheet: View {
                 }
                 .padding(.vertical, 4)
             }
+            .onMove { source, destination in
+                engine.moveFreeModeTakes(from: source, to: destination)
+            }
         } header: {
-            Text("Modo Livre")
+            Text("Modo Livre (arrasta para reordenar)")
         }
     }
 
@@ -214,7 +256,10 @@ struct StoryboardSheet: View {
                             .foregroundStyle(.secondary)
                         if let take {
                             let duration = take.durationSeconds.formatted(.number.locale(Locale(identifier: "pt_PT")).precision(.fractionLength(1)))
-                            Label(take.isVideo ? "Vídeo · \(duration) s" : "Fotografia captada",
+                            let trimBadge = take.fileURL.flatMap { engine.clipTrims[$0] }.map { t in
+                                String(format: " · aparado %.1f s", max(0, t.endSeconds - t.startSeconds))
+                            } ?? ""
+                            Label(take.isVideo ? "Vídeo · \(duration) s\(trimBadge)" : "Fotografia captada",
                                   systemImage: "checkmark.circle.fill")
                                 .foregroundStyle(.primary)
                                 .font(.caption.weight(.medium))
@@ -226,6 +271,19 @@ struct StoryboardSheet: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .accessibilityElement(children: .combine)
+
+                    if let take, take.isVideo, let url = take.fileURL, take.durationSeconds > 0.3 {
+                        Button {
+                            trimTarget = TrimTarget(title: shot.title, url: url, duration: take.durationSeconds)
+                        } label: {
+                            Image(systemName: "scissors")
+                                .frame(minWidth: 36, minHeight: 44)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(engine.isExportingReel)
+                        .accessibilityLabel("Aparar plano \(index + 1)")
+                    }
 
                     Button {
                         engine.selectShot(at: index)
@@ -601,6 +659,130 @@ private struct PhotoPreviewSheet: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Fechar") { dismiss() }
                 }
+            }
+        }
+    }
+}
+
+private struct ClipTrimSheet: View {
+    let title: String
+    let url: URL
+    let totalDuration: Double
+    let onSave: (ClipTrim?) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var player: AVPlayer
+    @State private var startSeconds: Double
+    @State private var endSeconds: Double
+
+    init(
+        title: String,
+        url: URL,
+        totalDuration: Double,
+        existingTrim: ClipTrim?,
+        onSave: @escaping (ClipTrim?) -> Void
+    ) {
+        self.title = title
+        self.url = url
+        self.totalDuration = max(0.3, totalDuration)
+        self.onSave = onSave
+        _player = State(initialValue: AVPlayer(url: url))
+        let initialStart = max(0, min(existingTrim?.startSeconds ?? 0, max(0, totalDuration - 0.2)))
+        let initialEnd = max(initialStart + 0.2, min(existingTrim?.endSeconds ?? totalDuration, totalDuration))
+        _startSeconds = State(initialValue: initialStart)
+        _endSeconds = State(initialValue: initialEnd)
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 16) {
+                VideoPlayer(player: player)
+                    .frame(height: 300)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .padding(.horizontal)
+
+                VStack(spacing: 12) {
+                    HStack {
+                        Text("Duração final")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(String(format: "%.1f s (de %.1f s)", max(0, endSeconds - startSeconds), totalDuration))
+                            .font(.subheadline.bold().monospacedDigit())
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("Início")
+                            Spacer()
+                            Text(String(format: "%.1f s", startSeconds)).monospacedDigit()
+                        }
+                        .font(.caption.weight(.semibold))
+                        Slider(
+                            value: Binding(
+                                get: { startSeconds },
+                                set: { newVal in
+                                    startSeconds = min(newVal, endSeconds - 0.2)
+                                    player.seek(to: CMTime(seconds: startSeconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+                                }
+                            ),
+                            in: 0...max(0.2, totalDuration - 0.2),
+                            step: 0.1
+                        )
+                        .tint(.yellow)
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("Fim")
+                            Spacer()
+                            Text(String(format: "%.1f s", endSeconds)).monospacedDigit()
+                        }
+                        .font(.caption.weight(.semibold))
+                        Slider(
+                            value: Binding(
+                                get: { endSeconds },
+                                set: { newVal in
+                                    endSeconds = max(newVal, startSeconds + 0.2)
+                                    player.seek(to: CMTime(seconds: endSeconds, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+                                }
+                            ),
+                            in: 0.2...totalDuration,
+                            step: 0.1
+                        )
+                        .tint(.yellow)
+                    }
+
+                    Button("Repor corte original") {
+                        startSeconds = 0
+                        endSeconds = totalDuration
+                        player.seek(to: .zero)
+                    }
+                    .font(.footnote.weight(.semibold))
+                    .padding(.top, 4)
+                }
+                .padding(.horizontal, 20)
+
+                Spacer()
+            }
+            .padding(.top, 12)
+            .navigationTitle("Aparar · \(title)")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancelar") { dismiss() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Guardar") {
+                        let isFull = startSeconds <= 0.05 && abs(endSeconds - totalDuration) <= 0.05
+                        onSave(isFull ? nil : ClipTrim(startSeconds: startSeconds, endSeconds: endSeconds))
+                        dismiss()
+                    }
+                    .fontWeight(.semibold)
+                }
+            }
+            .onDisappear {
+                player.pause()
             }
         }
     }

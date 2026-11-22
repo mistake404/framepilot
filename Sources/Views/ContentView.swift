@@ -16,7 +16,7 @@ struct ContentView: View {
     @AppStorage("framepilot.teleprompter.speed") private var teleprompterSpeed: Double = 28.0
 
     private var isAnyProFeatureActive: Bool {
-        engine.whiteBalanceLocked || engine.showHighlights || engine.exposureBias != 0 ||
+        engine.whiteBalanceLocked || engine.showHighlights || engine.voiceCoachingEnabled || engine.exposureBias != 0 ||
         engine.timerOption != .off ||
         engine.aspectMask != .full ||
         engine.isVirtualDollyActive ||
@@ -792,6 +792,13 @@ private struct ProControlsDrawerView: View {
                                   isActive: engine.showHighlights && engine.highlightsAvailable, accentColor: .yellow)
                 }
                 .disabled(!engine.highlightsAvailable)
+
+                Button { engine.voiceCoachingEnabled.toggle() } label: {
+                    ProDrawerTile(icon: engine.voiceCoachingEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill",
+                                  title: "Voz",
+                                  value: engine.voiceCoachingEnabled ? "Ativa" : "Off",
+                                  isActive: engine.voiceCoachingEnabled, accentColor: .cyan)
+                }
 
                 // 3. Flip Camera
                 Button {

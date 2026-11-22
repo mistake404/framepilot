@@ -152,6 +152,12 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     @Published var includeSoundDesign: Bool = true
     @Published var includeDynamicCaptions: Bool = false
     @Published var editedTranscriptions: [URL: CaptionService.Transcription] = [:]
+    @Published var clipTrims: [URL: ClipTrim] = [:]
+    @Published var voiceCoachingEnabled: Bool = false {
+        didSet {
+            if !voiceCoachingEnabled { voiceCoach.stopImmediately() }
+        }
+    }
     private var captionPreparation: Task<Void, Never>?
     @Published var isPreparingCaptions: Bool = false
     @Published private(set) var selectedMusicURL: URL?
@@ -243,6 +249,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     private var wasLocked: Bool = false
     private var continuityReference: SceneContinuityReference?
     private let takeMetrics = TakeMetricsTracker()
+    private let voiceCoach = DirectorVoiceCoach()
     private var verdictDismissTask: DispatchWorkItem?
     private var lastAudioClipHoldTime: CFTimeInterval = 0
 
@@ -526,6 +533,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     }
 
     private func stopTelemetry() {
+        voiceCoach.stopImmediately()
         focusLoupe.dismiss()
         highlights.rects = []
         hudTimer?.cancel()
@@ -1294,9 +1302,23 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         if let url = sessionTakes[id]?.fileURL {
             cancelCaptionPreparation()
             editedTranscriptions.removeValue(forKey: url)
+            clipTrims.removeValue(forKey: url)
             try? FileManager.default.removeItem(at: url)
         }
         sessionTakes.removeValue(forKey: id)
+    }
+
+    func moveFreeModeTakes(from source: IndexSet, to destination: Int) {
+        guard !captureBusy, !isExportingReel else { return }
+        var reordered = freeModeTakeOrder
+        let moving = source.sorted().map { reordered[$0] }
+        for index in source.sorted(by: >) {
+            reordered.remove(at: index)
+        }
+        let adjustedDestination = destination - source.filter { $0 < destination }.count
+        let clamped = max(0, min(reordered.count, adjustedDestination))
+        reordered.insert(contentsOf: moving, at: clamped)
+        freeModeTakeOrder = reordered
     }
 
     func prepareCaptionsForEditing() {
@@ -1348,6 +1370,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         let removeSilences = removeSilencesEnabled
         let lut = selectedLUTURL
         let precomputed = editedTranscriptions
+        let trims = clipTrims
         isExportingReel = true
         Task {
             do {
@@ -1363,7 +1386,8 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
                     transition: transition,
                     removeSilences: removeSilences,
                     customLUTURL: lut,
-                    precomputedTranscriptions: precomputed
+                    precomputedTranscriptions: precomputed,
+                    clipTrims: trims
                 )
                 await MainActor.run {
                     self.isExportingReel = false
@@ -1550,6 +1574,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     private func clearSessionFiles() {
         cancelCaptionPreparation()
         editedTranscriptions.removeAll()
+        clipTrims.removeAll()
         try? FileManager.default.removeItem(at: clipDirectory)
     }
 
@@ -1749,6 +1774,9 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
             self.impactFeedback.impactOccurred()
         }
         self.wasLocked = advice.isLocked
+        if self.voiceCoachingEnabled && !self.isRecording && self.countdownRemaining == 0 && !self.captureBusy {
+            self.voiceCoach.speakAdviceIfAppropriate(advice, isRecording: false)
+        }
     }
 
     // MARK: - Shutter & Countdown
@@ -1787,6 +1815,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     private func startCountdown(seconds: Int, completion: @escaping () -> Void) {
         countdownRemaining = seconds
         impactFeedback.impactOccurred()
+        if voiceCoachingEnabled { voiceCoach.speakCountdown(seconds) }
         countdownTimer?.invalidate()
         countdownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
             guard let self else {
@@ -1796,10 +1825,12 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
             if self.countdownRemaining > 1 {
                 self.countdownRemaining -= 1
                 self.impactFeedback.impactOccurred()
+                if self.voiceCoachingEnabled { self.voiceCoach.speakCountdown(self.countdownRemaining) }
             } else {
                 timer.invalidate()
                 self.countdownTimer = nil
                 self.countdownRemaining = 0
+                self.voiceCoach.stopImmediately()
                 completion()
             }
         }
@@ -1866,6 +1897,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
 
     private func startVideoRecording() {
         guard beginCapture() else { return }
+        voiceCoach.stopImmediately()
         let clipURL = sessionClipURL()
         recordingURL = clipURL
         recordingTarget = activeShot?.targetDurationSeconds
@@ -2104,6 +2136,9 @@ extension SpatialCameraEngine: AVCaptureFileOutputRecordingDelegate {
     private func presentTakeVerdict(_ verdict: TakeVerdict) {
         verdictDismissTask?.cancel()
         latestTakeVerdict = verdict
+        if voiceCoachingEnabled {
+            voiceCoach.speakVerdict(verdict)
+        }
         let work = DispatchWorkItem { [weak self] in
             if self?.latestTakeVerdict?.id == verdict.id {
                 self?.latestTakeVerdict = nil
@@ -2119,6 +2154,7 @@ extension SpatialCameraEngine: AVCaptureFileOutputRecordingDelegate {
         if let old = sessionTakes[shot.id]?.fileURL, old != url {
             cancelCaptionPreparation()
             editedTranscriptions.removeValue(forKey: old)
+            clipTrims.removeValue(forKey: old)
             try? FileManager.default.removeItem(at: old)
         }
         sessionTakes[shot.id] = SessionTake(shotId: shot.id, shotTitle: shot.title, isVideo: url != nil,
