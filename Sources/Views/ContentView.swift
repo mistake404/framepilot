@@ -2,10 +2,12 @@ import SwiftUI
 
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @StateObject private var engine = SpatialCameraEngine()
     @State private var showPackSheet = false
     @State private var showStoryboardSheet = false
     @State private var showProDrawer = false
+    @State private var lensSelectionFeedback = false
     @State private var showExposureSlider = false
     @State private var showRackFocusBar = false
     @State private var showTeleprompter = false
@@ -234,18 +236,11 @@ struct ContentView: View {
                         engine: engine,
                         showExposureSlider: $showExposureSlider,
                         showRackFocusBar: $showRackFocusBar,
-                        onClose: {
-                            withAnimation(.spring(response: 0.32, dampingFraction: 0.8)) {
-                                showProDrawer = false
-                            }
-                        }
+                        onClose: { setProDrawerVisible(false) }
                     )
                     .padding(.horizontal, 14)
                     .padding(.bottom, 8)
-                    .transition(.asymmetric(
-                        insertion: .scale(scale: 0.94).combined(with: .opacity).combined(with: .move(edge: .bottom)),
-                        removal: .scale(scale: 0.94).combined(with: .opacity).combined(with: .move(edge: .bottom))
-                    ))
+                    .transition(reduceMotion ? AnyTransition.opacity : .offset(y: 12).combined(with: .opacity))
                 }
 
                 // Clean Viewfinder primary dock: Lenses (.5, 1x, 2x, 5x) + PRO Drawer button
@@ -254,30 +249,33 @@ struct ContentView: View {
                         HStack(spacing: 3) {
                             ForEach(engine.availableLenses, id: \.self) { lens in
                                 let isSelected = abs(engine.activeLens - lens) < 0.15
-                                let label = lens == 0.5 ? ".5" : "\(Int(lens))"
+                                let label = lens == 0.5 ? "0,5" : "\(Int(lens))"
                                 Button {
+                                    if !isSelected { lensSelectionFeedback.toggle() }
                                     engine.setLens(lens)
                                 } label: {
-                                    Text(isSelected ? "\(label)x" : label)
+                                    Text(isSelected ? "\(label)×" : label)
                                         .font(.system(size: 11, weight: .bold, design: .monospaced))
                                         .foregroundColor(isSelected ? .yellow : .white)
-                                        .frame(width: 34, height: 28)
+                                        .frame(width: 36, height: 32)
                                         .background(
                                             Circle().fill(isSelected ? Color.black.opacity(0.8) : Color.clear)
                                         )
+                                        .frame(width: 44, height: 44)
+                                        .contentShape(Rectangle())
                                 }
+                                .accessibilityLabel("Ampliação \(label) vezes")
+                                .accessibilityAddTraits(isSelected ? .isSelected : [])
                             }
                         }
                         .padding(.horizontal, 5)
-                        .padding(.vertical, 3)
                         .background(Capsule().fill(Color.black.opacity(0.52)))
+                        .sensoryFeedback(.selection, trigger: lensSelectionFeedback)
                     }
 
                     // PRO button with active indicator
                     Button {
-                        withAnimation(.spring(response: 0.32, dampingFraction: 0.8)) {
-                            showProDrawer.toggle()
-                        }
+                        setProDrawerVisible(!showProDrawer)
                     } label: {
                         HStack(spacing: 5) {
                             Image(systemName: showProDrawer ? "chevron.down" : "slider.horizontal.3")
@@ -292,7 +290,7 @@ struct ContentView: View {
                         }
                         .foregroundColor(showProDrawer || isAnyProFeatureActive ? .yellow : .white)
                         .padding(.horizontal, 10)
-                        .padding(.vertical, 7)
+                        .frame(minHeight: 44)
                         .background(
                             Capsule()
                                 .fill(Color.black.opacity(0.52))
@@ -302,6 +300,8 @@ struct ContentView: View {
                                 )
                         )
                     }
+                    .accessibilityLabel(showProDrawer ? "Fechar controlos PRO" : "Abrir controlos PRO")
+                    .sensoryFeedback(.selection, trigger: showProDrawer)
                 }
                 .padding(.bottom, 10)
 
@@ -346,6 +346,7 @@ struct ContentView: View {
         .sheet(isPresented: $showStoryboardSheet) {
             StoryboardSheet(engine: engine)
                 .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
         }
         .sheet(isPresented: $showTeleprompterEditor) {
             TeleprompterEditorSheet(
@@ -356,8 +357,14 @@ struct ContentView: View {
         }
     }
 
+    private func setProDrawerVisible(_ visible: Bool) {
+        withAnimation(reduceMotion ? nil : .smooth(duration: 0.28)) {
+            showProDrawer = visible
+        }
+    }
+
     private var bottomCaptureDock: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 6) {
             if engine.isRecording {
                 HStack(spacing: 6) {
                     Circle()
@@ -379,6 +386,7 @@ struct ContentView: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 5)
                 .background(Capsule().fill(Color.red.opacity(0.35)))
+                .frame(minHeight: 44)
             } else {
                 HStack(spacing: 16) {
                     ForEach(CaptureMode.allCases) { mode in
@@ -389,7 +397,10 @@ struct ContentView: View {
                                 .font(.system(size: 12, weight: .bold))
                                 .tracking(1)
                                 .foregroundColor(engine.captureMode == mode ? .yellow : .white.opacity(0.65))
+                                .frame(minWidth: 44, minHeight: 44)
+                                .contentShape(Rectangle())
                         }
+                        .accessibilityAddTraits(engine.captureMode == mode ? .isSelected : [])
                     }
 
                     if engine.captureMode == .video, let shot = engine.activeShot {
@@ -406,9 +417,12 @@ struct ContentView: View {
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
                             .background(Capsule().fill(Color.white.opacity(0.12)))
+                            .frame(minHeight: 44)
+                            .contentShape(Rectangle())
                         }
                     }
                 }
+                .sensoryFeedback(.selection, trigger: engine.captureMode)
             }
 
             HStack {
@@ -449,6 +463,8 @@ struct ContentView: View {
                         videoCount: engine.recordedVideoCount
                     )
                 }
+                .accessibilityLabel("Abrir storyboard da sessão")
+                .accessibilityValue("\(engine.completedShotIds.count) de \(engine.selectedPack.shots.count) planos concluídos")
             }
             .padding(.horizontal, 24)
         }
@@ -559,6 +575,7 @@ private struct TopTelemetryBar: View {
 }
 
 private struct CaptureShutterButton: View {
+    @State private var shutterFeedback = false
     @ObservedObject var hudStore: HUDTelemetryStore
     let captureMode: CaptureMode
     let isRecording: Bool
@@ -566,8 +583,17 @@ private struct CaptureShutterButton: View {
     let targetProgress: Double
     let action: () -> Void
 
+    private var shutterLabel: String {
+        if isCountingDown { return "Cancelar temporizador" }
+        if captureMode == .photo { return "Tirar fotografia" }
+        return isRecording ? "Parar gravação" : "Iniciar gravação"
+    }
+
     var body: some View {
-        Button(action: action) {
+        Button {
+            shutterFeedback.toggle()
+            action()
+        } label: {
             ZStack {
                 Circle()
                     .stroke(hudStore.telemetry.advice.isLocked ? Color.green : Color.white, lineWidth: 4)
@@ -603,6 +629,8 @@ private struct CaptureShutterButton: View {
                 }
             }
         }
+        .accessibilityLabel(shutterLabel)
+        .sensoryFeedback(.impact(weight: .light, intensity: 0.5), trigger: shutterFeedback)
     }
 }
 
@@ -642,6 +670,7 @@ private struct SessionStoryboardButton: View {
 // MARK: - Pro Drawer Components
 
 private struct ProControlsDrawerView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var engine: SpatialCameraEngine
     @Binding var showExposureSlider: Bool
     @Binding var showRackFocusBar: Bool
@@ -666,7 +695,10 @@ private struct ProControlsDrawerView: View {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 18))
                         .foregroundColor(.white.opacity(0.65))
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
                 }
+                .accessibilityLabel("Fechar controlos PRO")
             }
             .padding(.horizontal, 4)
 
@@ -674,7 +706,7 @@ private struct ProControlsDrawerView: View {
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 8) {
                 // 1. Exposure (EV)
                 Button {
-                    withAnimation(.easeInOut(duration: 0.18)) {
+                    withAnimation(reduceMotion ? nil : .smooth(duration: 0.2)) {
                         showExposureSlider.toggle()
                     }
                 } label: {
@@ -695,7 +727,7 @@ private struct ProControlsDrawerView: View {
                         ProDrawerTile(
                             icon: engine.flashOption.iconName,
                             title: "Flash",
-                            value: engine.flashOption == .auto ? "Auto" : (engine.flashOption == .on ? "On" : "Off"),
+                            value: engine.flashOption == .auto ? "Auto" : (engine.flashOption == .on ? "Ligado" : "Desligado"),
                             isActive: engine.flashOption == .on,
                             accentColor: .yellow
                         )
@@ -735,7 +767,7 @@ private struct ProControlsDrawerView: View {
                 } label: {
                     ProDrawerTile(
                         icon: "timer",
-                        title: "Timer",
+                        title: "Temporizador",
                         value: engine.timerOption == .off ? "Desligado" : engine.timerOption.label,
                         isActive: engine.timerOption != .off,
                         accentColor: .yellow
@@ -762,8 +794,8 @@ private struct ProControlsDrawerView: View {
                 } label: {
                     ProDrawerTile(
                         icon: "square.on.square.dashed",
-                        title: "Ghost",
-                        value: engine.showGhostOverlay ? "Ativo" : "Off",
+                        title: "Fantasma",
+                        value: engine.showGhostOverlay ? "Ativo" : "Inativo",
                         isActive: engine.showGhostOverlay,
                         accentColor: .cyan
                     )
@@ -776,7 +808,7 @@ private struct ProControlsDrawerView: View {
                     ProDrawerTile(
                         icon: "point.3.filled.connected.trianglepath.dotted",
                         title: "Dolly 3D",
-                        value: engine.isVirtualDollyActive ? "Ligado" : "Off",
+                        value: engine.isVirtualDollyActive ? "Ligado" : "Desligado",
                         isActive: engine.isVirtualDollyActive,
                         accentColor: .cyan
                     )
@@ -784,14 +816,14 @@ private struct ProControlsDrawerView: View {
 
                 // 8. Hollywood Rack Focus
                 Button {
-                    withAnimation(.easeInOut(duration: 0.18)) {
+                    withAnimation(reduceMotion ? nil : .smooth(duration: 0.2)) {
                         showRackFocusBar.toggle()
                     }
                 } label: {
                     ProDrawerTile(
                         icon: "camera.aperture",
                         title: "Rack Focus",
-                        value: (engine.focusMarkA != nil || engine.focusMarkB != nil) ? "Marcado" : (showRackFocusBar ? "Aberto" : "Off"),
+                        value: (engine.focusMarkA != nil || engine.focusMarkB != nil) ? "Marcado" : (showRackFocusBar ? "Aberto" : "Inativo"),
                         isActive: showRackFocusBar || engine.focusMarkA != nil,
                         accentColor: .yellow
                     )

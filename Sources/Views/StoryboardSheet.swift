@@ -4,184 +4,30 @@ import AVKit
 struct StoryboardSheet: View {
     @ObservedObject var engine: SpatialCameraEngine
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     @State private var selectedLook: ReelLook = .film35mm
     @State private var previewVideoURL: URL?
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 0) {
+            Group {
                 if engine.selectedPack.shots.isEmpty {
                     ContentUnavailableView(
-                        "Modo Livre",
+                        "Modo livre",
                         systemImage: "film.stack",
                         description: Text("Escolhe um guião com planos para montar automaticamente o teu Reel.")
                     )
                 } else {
                     List {
-                        Section {
-                            ForEach(Array(engine.selectedPack.shots.enumerated()), id: \.element.id) { index, shot in
-                                let take = engine.sessionTakes[shot.id]
-                                HStack(spacing: 12) {
-                                    // Thumbnail (tap to play if video)
-                                    Button {
-                                        if let url = take?.fileURL, take?.isVideo == true {
-                                            previewVideoURL = url
-                                        }
-                                    } label: {
-                                        ZStack {
-                                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                                .fill(Color.white.opacity(0.08))
-                                                .frame(width: 52, height: 68)
-
-                                            if let thumb = take?.thumbnail {
-                                                Image(uiImage: thumb)
-                                                    .resizable()
-                                                    .scaledToFill()
-                                                    .frame(width: 52, height: 68)
-                                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                                            } else {
-                                                Image(systemName: shot.kind.iconName)
-                                                    .font(.system(size: 18))
-                                                    .foregroundColor(.secondary)
-                                            }
-
-                                            if take?.isVideo == true && take?.fileURL != nil {
-                                                Image(systemName: "play.circle.fill")
-                                                    .font(.system(size: 20))
-                                                    .foregroundColor(.white)
-                                                    .shadow(radius: 4)
-                                            }
-                                        }
-                                    }
-                                    .buttonStyle(.plain)
-
-                                    VStack(alignment: .leading, spacing: 3) {
-                                        HStack(spacing: 6) {
-                                            Text("\(index + 1). \(shot.title)")
-                                                .font(.headline)
-
-                                            if take != nil {
-                                                Image(systemName: "checkmark.circle.fill")
-                                                    .font(.caption)
-                                                    .foregroundColor(.green)
-                                            }
-                                        }
-
-                                        Text("\(shot.kind.rawValue) • \(shot.lensLabel) • Alvo \(shot.durationLabel)")
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-
-                                        if let take {
-                                            Text(take.isVideo ? String(format: "Gravado (%.1fs) • Toca p/ ver", take.durationSeconds) : "Foto capturada")
-                                                .font(.caption2.monospacedDigit())
-                                                .foregroundColor(.green)
-                                        } else {
-                                            Text("Por gravar")
-                                                .font(.caption2)
-                                                .foregroundColor(.orange)
-                                        }
-                                    }
-
-                                    Spacer()
-
-                                    Button(take == nil ? "Gravar" : "Repetir") {
-                                        engine.selectShot(at: index)
-                                        dismiss()
-                                    }
-                                    .buttonStyle(.bordered)
-                                    .tint(take == nil ? .yellow : .cyan)
-                                    .controlSize(.small)
-                                }
-                                .padding(.vertical, 3)
-                            }
-                        } header: {
-                            Text(engine.selectedPack.name)
-                        }
+                        plansSection
+                        exportOptions
                     }
-
-                    // Cinematic Look Picker + Sound Design Toggle + 1-Click Auto-Edit Reel Export Footer
-                    VStack(spacing: 12) {
-                        HStack {
-                            Text("Paleta de Cinema:")
-                                .font(.caption.bold())
-                                .foregroundColor(.secondary)
-                            Spacer()
-                        }
-
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 8) {
-                                ForEach(ReelLook.allCases) { look in
-                                    Button {
-                                        selectedLook = look
-                                    } label: {
-                                        Text(look.rawValue)
-                                            .font(.caption.bold())
-                                            .foregroundColor(selectedLook == look ? .black : .primary)
-                                            .padding(.horizontal, 12)
-                                            .padding(.vertical, 6)
-                                            .background(
-                                                Capsule().fill(selectedLook == look ? Color.yellow : Color.white.opacity(0.12))
-                                            )
-                                    }
-                                }
-                            }
-                        }
-
-                        Toggle(isOn: $engine.includeSoundDesign) {
-                            HStack(spacing: 6) {
-                                Image(systemName: "waveform.badge.plus")
-                                    .foregroundColor(.cyan)
-                                Text("Sound Design (Whooshes nas transições)")
-                                    .font(.caption.bold())
-                            }
-                        }
-                        .tint(.cyan)
-
-                        Toggle(isOn: $engine.includeDynamicCaptions) {
-                            HStack(spacing: 6) {
-                                Image(systemName: "captions.bubble.fill")
-                                    .foregroundColor(.yellow)
-                                Text("Legendas Dinâmicas Virais (Hormozi / Viral)")
-                                    .font(.caption.bold())
-                            }
-                        }
-                        .tint(.yellow)
-
-                        Button {
-                            engine.exportSessionReel(look: selectedLook)
-                        } label: {
-                            HStack(spacing: 8) {
-                                if engine.isExportingReel {
-                                    ProgressView()
-                                        .tint(.black)
-                                    Text("A montar Reel (\(selectedLook.rawValue))...")
-                                } else {
-                                    Image(systemName: "wand.and.stars")
-                                    Text("Exportar Reel (\(engine.recordedVideoCount) planos)")
-                                }
-                            }
-                            .font(.headline)
-                            .foregroundColor(.black)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 14)
-                            .background(
-                                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                    .fill(engine.recordedVideoCount > 0 ? Color.yellow : Color.gray.opacity(0.4))
-                            )
-                        }
-                        .disabled(engine.recordedVideoCount == 0 || engine.isExportingReel)
-
-                        Text("Monta os clips por ordem com cor uniforme e guarda na galeria.")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                            .multilineTextAlignment(.center)
-                    }
-                    .padding(16)
-                    .background(Color(UIColor.secondarySystemBackground))
+                    .listStyle(.insetGrouped)
+                    .safeAreaInset(edge: .bottom, spacing: 0) { exportBar }
                 }
             }
-            .navigationTitle("Storyboard da Sessão")
+            .navigationTitle("Storyboard da sessão")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -197,6 +43,157 @@ struct StoryboardSheet: View {
                 }
             }
         }
+    }
+
+    private var plansSection: some View {
+        Section {
+            ForEach(Array(engine.selectedPack.shots.enumerated()), id: \.element.id) { index, shot in
+                let take = engine.sessionTakes[shot.id]
+                let thumbnail = ShotThumbnail(image: take?.thumbnail, symbol: shot.kind.iconName)
+                let layout = dynamicTypeSize.isAccessibilitySize
+                    ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+                    : AnyLayout(HStackLayout(alignment: .center, spacing: 12))
+                layout {
+                    if let url = take?.fileURL, take?.isVideo == true {
+                        Button {
+                            previewVideoURL = url
+                        } label: {
+                            thumbnail.overlay {
+                                Image(systemName: "play.fill")
+                                    .font(.footnote.bold())
+                                    .foregroundStyle(.white)
+                                    .frame(width: 28, height: 28)
+                                    .background(.black.opacity(0.72), in: Circle())
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Reproduzir plano \(index + 1), \(shot.title)")
+                    } else {
+                        thumbnail.accessibilityHidden(true)
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("\(index + 1). \(shot.title)")
+                            .font(.headline)
+                        Text("\(shot.kind.rawValue) · \(shot.lensLabel) · Alvo \(shot.durationLabel)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if let take {
+                            let duration = take.durationSeconds.formatted(.number.locale(Locale(identifier: "pt_PT")).precision(.fractionLength(1)))
+                            Label(take.isVideo ? "Vídeo · \(duration) s" : "Fotografia captada",
+                                  systemImage: "checkmark.circle.fill")
+                                .foregroundStyle(.primary)
+                                .font(.caption.weight(.medium))
+                        } else {
+                            Label("Por gravar", systemImage: "circle.dashed")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityElement(children: .combine)
+
+                    Button {
+                        engine.selectShot(at: index)
+                        dismiss()
+                    } label: {
+                        Text(take == nil ? "Gravar" : "Repetir")
+                            .font(.subheadline.weight(.semibold))
+                            .padding(.horizontal, 8)
+                            .frame(minWidth: 44, minHeight: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityLabel("\(take == nil ? "Gravar" : "Repetir") plano \(index + 1)")
+                }
+                .padding(.vertical, 4)
+            }
+        } header: {
+            Text(engine.selectedPack.name)
+        }
+    }
+
+    private var exportOptions: some View {
+        Section("Montagem") {
+            Picker(selection: $selectedLook) {
+                ForEach(ReelLook.allCases) { look in
+                    Text(look.rawValue).tag(look)
+                }
+            } label: {
+                Label("Paleta de cinema", systemImage: "camera.filters")
+            }
+            .pickerStyle(.menu)
+
+            Toggle(isOn: $engine.includeSoundDesign) {
+                Label("Som nas transições", systemImage: "waveform")
+            }
+            Toggle(isOn: $engine.includeDynamicCaptions) {
+                Label("Legendas dinâmicas", systemImage: "captions.bubble")
+            }
+        }
+    }
+
+    private var exportBar: some View {
+        let count = engine.recordedVideoCount
+        let isExporting = engine.isExportingReel
+        return VStack(spacing: 8) {
+            Button {
+                engine.exportSessionReel(look: selectedLook)
+            } label: {
+                HStack(spacing: 8) {
+                    if isExporting {
+                        ProgressView().tint(.black)
+                        Text("A montar o Reel…")
+                    } else {
+                        Image(systemName: "film.stack")
+                        Text("Exportar Reel")
+                        if count > 0 {
+                            Text(verbatim: count == 1 ? "· 1 plano" : "· \(count) planos")
+                                .monospacedDigit()
+                        }
+                    }
+                }
+                .font(.headline)
+                .foregroundStyle(count > 0 || isExporting ? Color.black : Color.secondary)
+                .padding(.horizontal, 12)
+                .frame(maxWidth: .infinity, minHeight: 48)
+                .background(count > 0 || isExporting ? Color.yellow : Color(uiColor: .tertiarySystemFill),
+                            in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .disabled(count == 0 || isExporting)
+
+            Text(count == 0 ? "Grava pelo menos um plano em vídeo para exportar." : "Os vídeos são montados pela ordem do guião e guardados num Reel em Fotografias.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.regularMaterial)
+        .overlay(alignment: .top) { Divider() }
+    }
+}
+
+private struct ShotThumbnail: View {
+    let image: UIImage?
+    let symbol: String
+
+    var body: some View {
+        ZStack {
+            Color(uiColor: .secondarySystemFill)
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Image(systemName: symbol)
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: 52, height: 68)
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
     }
 }
 
