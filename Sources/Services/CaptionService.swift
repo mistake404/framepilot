@@ -15,20 +15,38 @@ enum CaptionService {
     private static let font = UIFont.systemFont(ofSize: 58, weight: .black)
     private static let maxTextWidth: CGFloat = 850
 
-    fileprivate struct Word {
-        let text: String
+    struct Word: Identifiable, Hashable {
+        let id = UUID()
+        var text: String
         let start: Double
         let end: Double
     }
 
     struct Transcription {
-        fileprivate let words: [Word]
-        fileprivate let sourceOrigin: Double
+        var words: [Word]
+        let sourceOrigin: Double
 
         func cues(in range: CMTimeRange, at reelStart: CMTime) -> [CaptionCue] {
-            CaptionService.makeCues(words, sourceStart: range.start.seconds - sourceOrigin,
-                                    duration: range.duration.seconds, reelStart: reelStart.seconds)
+            let cleanWords = words.compactMap { word -> Word? in
+                let trimmed = word.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return nil }
+                return Word(text: trimmed.uppercased(), start: word.start, end: word.end)
+            }
+            return CaptionService.makeCues(cleanWords, sourceStart: range.start.seconds - sourceOrigin,
+                                           duration: range.duration.seconds, reelStart: reelStart.seconds)
         }
+    }
+
+    /// Convenience helper to transcribe a full video clip URL for interactive caption review/editing.
+    static func transcribeClip(_ url: URL, recognizer: SFSpeechRecognizer) async -> Transcription? {
+        let asset = AVURLAsset(url: url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
+        guard let audio = try? await asset.loadTracks(withMediaType: .audio).first,
+              let audioRange = try? await audio.load(.timeRange),
+              audioRange.duration.isNumeric, audioRange.duration > .zero else {
+            return nil
+        }
+        return await transcribe(url, audioTrack: audio, trackStart: audioRange.start,
+                                range: audioRange, recognizer: recognizer)
     }
 
     static func localRecognizer() async -> SFSpeechRecognizer? {

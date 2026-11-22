@@ -119,6 +119,8 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     @Published var isVirtualDollyActive: Bool = false
     @Published var includeSoundDesign: Bool = true
     @Published var includeDynamicCaptions: Bool = false
+    @Published var editedTranscriptions: [URL: CaptionService.Transcription] = [:]
+    @Published var isPreparingCaptions: Bool = false
     @Published private(set) var selectedMusicURL: URL?
     @Published private(set) var isImportingMusic = false
     @Published var beatSyncEnabled = true
@@ -623,8 +625,14 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
             }
         } else {
             if connection.isVideoStabilizationSupported {
-                connection.preferredVideoStabilizationMode = format.isVideoStabilizationModeSupported(.cinematicExtended)
-                    ? .cinematicExtended : .auto
+                if !back {
+                    // Front camera: avoid heavy digital crop from .cinematicExtended so talking-head framing matches preview
+                    connection.preferredVideoStabilizationMode = format.isVideoStabilizationModeSupported(.standard)
+                        ? .standard : .off
+                } else {
+                    connection.preferredVideoStabilizationMode = format.isVideoStabilizationModeSupported(.cinematic)
+                        ? .cinematic : .auto
+                }
             }
             if movieOutput.availableVideoCodecTypes.contains(.hevc) {
                 movieOutput.setOutputSettings([AVVideoCodecKey: AVVideoCodecType.hevc], for: connection)
@@ -1039,6 +1047,41 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         try? FileManager.default.removeItem(at: selectedLUTURL.deletingLastPathComponent())
     }
 
+    func prepareCaptionsForEditing() {
+        guard !isPreparingCaptions else { return }
+        let orderedURLs = selectedPack.shots
+            .compactMap { sessionTakes[$0.id] }
+            .filter { $0.isVideo }
+            .compactMap { $0.fileURL }
+        guard !orderedURLs.isEmpty else { return }
+
+        let missing = orderedURLs.filter { editedTranscriptions[$0] == nil }
+        guard !missing.isEmpty else { return }
+
+        isPreparingCaptions = true
+        Task {
+            guard let recognizer = await CaptionService.localRecognizer() else {
+                await MainActor.run {
+                    self.isPreparingCaptions = false
+                    self.showToast("Reconhecimento de voz indisponível")
+                }
+                return
+            }
+            var results: [URL: CaptionService.Transcription] = [:]
+            for url in missing {
+                if let t = await CaptionService.transcribeClip(url, recognizer: recognizer) {
+                    results[url] = t
+                }
+            }
+            await MainActor.run {
+                for (url, transcription) in results {
+                    self.editedTranscriptions[url] = transcription
+                }
+                self.isPreparingCaptions = false
+            }
+        }
+    }
+
     func exportSessionReel(look: ReelLook = .original) {
         guard !isExportingReel, !isImportingMusic, !isImportingLUT, !captureBusy else { return }
         let orderedURLs = selectedPack.shots
@@ -1059,6 +1102,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         let transition = selectedTransition
         let removeSilences = removeSilencesEnabled
         let lut = selectedLUTURL
+        let precomputed = editedTranscriptions
         isExportingReel = true
         Task {
             do {
@@ -1072,7 +1116,8 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
                     autoDuckingEnabled: ducking,
                     transition: transition,
                     removeSilences: removeSilences,
-                    customLUTURL: lut
+                    customLUTURL: lut,
+                    precomputedTranscriptions: precomputed
                 )
                 await MainActor.run {
                     self.isExportingReel = false

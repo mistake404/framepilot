@@ -62,7 +62,8 @@ enum ReelExporter {
         autoDuckingEnabled: Bool = true,
         transition: ReelTransition = .cut,
         removeSilences: Bool = false,
-        customLUTURL: URL? = nil
+        customLUTURL: URL? = nil,
+        precomputedTranscriptions: [URL: CaptionService.Transcription] = [:]
     ) async throws {
         guard !videoURLs.isEmpty else {
             throw ExportError.noVideoClips
@@ -140,7 +141,9 @@ enum ReelExporter {
                 if trimSilence || duckMusic {
                     voice = try BeatSyncEngine.voiceIntervals(in: asset, track: audio, range: analysisRange)
                 }
-                if let recognizer {
+                if includeViralCaptions, let edited = precomputedTranscriptions[url] {
+                    transcription = edited
+                } else if let recognizer {
                     transcription = await CaptionService.transcribe(url, audioTrack: audio, trackStart: audioRange.start,
                                                                     range: analysisRange, recognizer: recognizer)
                 }

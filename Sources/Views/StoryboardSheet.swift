@@ -12,6 +12,7 @@ struct StoryboardSheet: View {
     @State private var importKind: ImportKind = .music
     @State private var showFilePicker = false
     @State private var showImportError = false
+    @State private var showCaptionEditor = false
 
     private enum ImportKind {
         case music, lut
@@ -83,6 +84,9 @@ struct StoryboardSheet: View {
                 if let url = previewVideoURL {
                     ClipPreviewSheet(url: url)
                 }
+            }
+            .sheet(isPresented: $showCaptionEditor) {
+                CaptionEditorSheet(engine: engine)
             }
         }
     }
@@ -198,6 +202,28 @@ struct StoryboardSheet: View {
             }
             Toggle(isOn: $engine.includeDynamicCaptions) {
                 Label("Legendas dinâmicas", systemImage: "captions.bubble")
+            }
+            if engine.includeDynamicCaptions && engine.recordedVideoCount > 0 {
+                Button {
+                    showCaptionEditor = true
+                } label: {
+                    HStack {
+                        Label("Rever / Corrigir Legendas", systemImage: "pencil.line")
+                        Spacer()
+                        if engine.isPreparingCaptions {
+                            ProgressView()
+                        } else if !engine.editedTranscriptions.isEmpty {
+                            Text("Pronto")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.green)
+                        } else {
+                            Image(systemName: "chevron.right")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .buttonStyle(.borderless)
             }
             HStack {
                 Button { openFilePicker(.lut) } label: {
@@ -350,6 +376,117 @@ private struct ClipPreviewSheet: View {
             .onDisappear {
                 player?.pause()
                 player = nil
+            }
+        }
+    }
+}
+
+private struct CaptionEditorSheet: View {
+    @ObservedObject var engine: SpatialCameraEngine
+    @Environment(\.dismiss) private var dismiss
+
+    private var videoTakes: [(shotTitle: String, url: URL)] {
+        engine.selectedPack.shots.compactMap { shot in
+            guard let take = engine.sessionTakes[shot.id],
+                  take.isVideo,
+                  let url = take.fileURL else { return nil }
+            return (shot.title, url)
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if engine.isPreparingCaptions {
+                    VStack(spacing: 14) {
+                        ProgressView()
+                            .scaleEffect(1.2)
+                        Text("A transcrever os planos no iPhone…")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if videoTakes.isEmpty {
+                    ContentUnavailableView(
+                        "Sem planos de vídeo",
+                        systemImage: "captions.bubble",
+                        description: Text("Grava primeiro um plano em vídeo para rever as legendas.")
+                    )
+                } else {
+                    List {
+                        Section {
+                            Text("Toca em qualquer palavra para corrigir a ortografia. Para apagar uma palavra mal ouvida, limpa o texto.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        ForEach(videoTakes, id: \.url) { item in
+                            Section(item.shotTitle) {
+                                if let transcription = engine.editedTranscriptions[item.url],
+                                   !transcription.words.isEmpty {
+                                    ForEach(transcription.words.indices, id: \.self) { wordIndex in
+                                        let word = transcription.words[wordIndex]
+                                        HStack(spacing: 10) {
+                                            Text(String(format: "%.1fs", word.start))
+                                                .font(.caption.monospacedDigit())
+                                                .foregroundStyle(.secondary)
+                                                .frame(width: 40, alignment: .leading)
+
+                                            TextField(
+                                                "Palavra",
+                                                text: Binding(
+                                                    get: {
+                                                        guard let list = engine.editedTranscriptions[item.url]?.words,
+                                                              wordIndex < list.count else { return "" }
+                                                        return list[wordIndex].text
+                                                    },
+                                                    set: { newValue in
+                                                        guard var t = engine.editedTranscriptions[item.url],
+                                                              wordIndex < t.words.count else { return }
+                                                        t.words[wordIndex].text = newValue
+                                                        engine.editedTranscriptions[item.url] = t
+                                                    }
+                                                )
+                                            )
+                                            .textInputAutocapitalization(.characters)
+                                            .autocorrectionDisabled(false)
+
+                                            if !word.text.isEmpty {
+                                                Button {
+                                                    guard var t = engine.editedTranscriptions[item.url],
+                                                          wordIndex < t.words.count else { return }
+                                                    t.words[wordIndex].text = ""
+                                                    engine.editedTranscriptions[item.url] = t
+                                                } label: {
+                                                    Image(systemName: "xmark.circle.fill")
+                                                        .foregroundStyle(.secondary)
+                                                }
+                                                .buttonStyle(.borderless)
+                                                .accessibilityLabel("Apagar palavra")
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    Text("Sem fala detetada neste plano.")
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                    .listStyle(.insetGrouped)
+                }
+            }
+            .navigationTitle("Corrigir Legendas")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Concluir") { dismiss() }
+                        .fontWeight(.semibold)
+                }
+            }
+            .onAppear {
+                engine.prepareCaptionsForEditing()
             }
         }
     }
