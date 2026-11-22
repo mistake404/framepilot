@@ -78,7 +78,8 @@ struct DirectorHUDView: View {
 
                 CoachingBanner(
                     advice: telemetry.advice,
-                    activeShot: activeShot
+                    activeShot: activeShot,
+                    telemetry: telemetry
                 )
                 .padding(.horizontal, 16)
 
@@ -469,6 +470,18 @@ private struct CenterReticleView: View {
 private struct CoachingBanner: View {
     let advice: CoachingAdvice
     let activeShot: ShotTemplate?
+    let telemetry: CameraTelemetry
+
+    private func isPitchOK(for shot: ShotTemplate) -> Bool {
+        telemetry.pitchDegrees >= (shot.targetPitchRange.lowerBound - 3.5) &&
+        telemetry.pitchDegrees <= (shot.targetPitchRange.upperBound + 3.5)
+    }
+
+    private func isDistanceOK(for shot: ShotTemplate) -> Bool {
+        guard let d = telemetry.lidarDistanceMeters else { return true }
+        return d >= (shot.targetDistanceRange.lowerBound - 0.15) &&
+               d <= (shot.targetDistanceRange.upperBound + 0.15)
+    }
 
     var body: some View {
         VStack(spacing: 4) {
@@ -490,18 +503,25 @@ private struct CoachingBanner: View {
                 .lineLimit(2)
 
             if let shot = activeShot {
+                let distOK = isDistanceOK(for: shot)
+                let pitchOK = isPitchOK(for: shot)
+
                 HStack(spacing: 9) {
                     Label(shot.lensLabel, systemImage: "camera.aperture")
-                    Label(shot.distanceLabel, systemImage: "ruler")
-                    Label(shot.pitchLabel, systemImage: "angle")
+                        .foregroundColor(.white.opacity(0.82))
+                    Label(shot.distanceLabel, systemImage: distOK ? "checkmark.circle.fill" : "ruler")
+                        .foregroundColor(distOK ? .green : .yellow)
+                    Label(shot.pitchLabel, systemImage: pitchOK ? "checkmark.circle.fill" : "angle")
+                        .foregroundColor(pitchOK ? .green : .yellow)
                     if shot.preferredMode == .video {
                         Label(shot.durationLabel, systemImage: "stopwatch")
+                            .foregroundColor(.white.opacity(0.82))
                     } else {
                         Label(shot.preferredMode.rawValue, systemImage: "camera.fill")
+                            .foregroundColor(.white.opacity(0.82))
                     }
                 }
                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .foregroundColor(.white.opacity(0.75))
                 .padding(.top, 2)
             }
         }

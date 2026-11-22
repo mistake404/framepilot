@@ -10,29 +10,55 @@ struct ScenePackSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var showBuilder = false
+    @State private var searchText = ""
+
+    private func matchesSearch(_ pack: ScenePack) -> Bool {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !query.isEmpty else { return true }
+        if pack.name.lowercased().contains(query) || pack.subtitle.lowercased().contains(query) {
+            return true
+        }
+        return pack.shots.contains { $0.title.lowercased().contains(query) }
+    }
+
+    private var filteredCustomPacks: [ScenePack] {
+        customPacks.filter(matchesSearch)
+    }
+
+    private var filteredPresetPacks: [ScenePack] {
+        presetPacks.filter(matchesSearch)
+    }
+
+    private func totalDurationLabel(for pack: ScenePack) -> String? {
+        let videoShots = pack.shots.filter { $0.preferredMode == .video }
+        guard !videoShots.isEmpty else { return nil }
+        let total = videoShots.reduce(0.0) { $0 + $1.targetDurationSeconds }
+        return String(format: "~%.0fs", total)
+    }
 
     var body: some View {
         NavigationStack {
             List {
-                if !customPacks.isEmpty {
+                if !filteredCustomPacks.isEmpty {
                     Section("Os Teus Guiões") {
-                        ForEach(customPacks) { pack in
+                        ForEach(filteredCustomPacks) { pack in
                             packRow(pack)
                         }
                         .onDelete { offsets in
                             for index in offsets {
-                                onDeleteCustom(customPacks[index].id)
+                                onDeleteCustom(filteredCustomPacks[index].id)
                             }
                         }
                     }
                 }
 
                 Section("Guiões Prontos") {
-                    ForEach(presetPacks) { pack in
+                    ForEach(filteredPresetPacks) { pack in
                         packRow(pack)
                     }
                 }
             }
+            .searchable(text: $searchText, prompt: "Pesquisar guião, nicho ou plano…")
             .navigationTitle("Guiões de Cena")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -78,7 +104,8 @@ struct ScenePackSheet: View {
                         Spacer()
 
                         if !pack.shots.isEmpty {
-                            Text("\(pack.shots.count) planos")
+                            let dur = totalDurationLabel(for: pack).map { " • \($0)" } ?? ""
+                            Text("\(pack.shots.count) planos\(dur)")
                                 .font(.caption.monospacedDigit())
                                 .foregroundColor(.secondary)
                         }

@@ -1403,6 +1403,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
                 motionPace: motionPace,
                 detectedFaceRect: faceRect,
                 isRecording: isRecording,
+                wasLocked: wasLocked,
                 target: currentTargetShot
             )
         }

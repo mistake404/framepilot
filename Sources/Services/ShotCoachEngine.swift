@@ -36,6 +36,7 @@ enum ShotCoachEngine {
         motionPace: MotionPace,
         detectedFaceRect: CGRect?,
         isRecording: Bool,
+        wasLocked: Bool = false,
         target: ShotTemplate?
     ) -> CoachingAdvice {
         // Live recording motion guard takes priority so video clips stay cinematic
@@ -80,14 +81,16 @@ enum ShotCoachEngine {
 
         // 1. Roll score (horizon) — gracefully relaxed/disabled on steep picado (top-down) & contrapicado
         let absPitch = abs(pitchDegrees)
-        let effectiveMaxRoll: Double
+        let baseMaxRoll: Double
         if absPitch >= 42.0 {
-            effectiveMaxRoll = 90.0
+            baseMaxRoll = 90.0
         } else if absPitch >= 20.0 {
-            effectiveMaxRoll = target.maxRollDegrees * 1.8
+            baseMaxRoll = target.maxRollDegrees * 1.8
         } else {
-            effectiveMaxRoll = target.maxRollDegrees
+            baseMaxRoll = target.maxRollDegrees
         }
+        // Hysteresis prevents rapid green/yellow flickering at the edge of the target zone
+        let effectiveMaxRoll = wasLocked ? (baseMaxRoll + 2.0) : baseMaxRoll
         let rollExcess = max(0, abs(rollDegrees) - effectiveMaxRoll)
         let rollScore = max(0.0, 1.0 - (rollExcess / 12.0))
 
@@ -102,7 +105,7 @@ enum ShotCoachEngine {
         }
         let pitchScore = max(0.0, 1.0 - (abs(pitchDelta) / 25.0))
 
-        // 3. Distance score (LiDAR)
+        // 3. Distance score (LiDAR) — when unavailable (e.g. front camera), do not penalize the alignment ring
         let distanceDelta: Double?
         let distanceScore: Double
         if let d = distanceMeters {
@@ -116,11 +119,13 @@ enum ShotCoachEngine {
             distanceScore = max(0.0, 1.0 - (abs(distanceDelta ?? 0) / 1.5))
         } else {
             distanceDelta = nil
-            distanceScore = 0.65
+            distanceScore = 1.0
         }
 
+        let pitchLockTol = wasLocked ? 5.5 : 3.5
+        let distLockTol = wasLocked ? 0.25 : 0.15
         let combinedScore = (rollScore * 0.25) + (pitchScore * 0.40) + (distanceScore * 0.35)
-        let isLocked = rollExcess == 0 && abs(pitchDelta) <= 3.5 && abs(distanceDelta ?? 0) <= 0.15
+        let isLocked = rollExcess == 0 && abs(pitchDelta) <= pitchLockTol && abs(distanceDelta ?? 0) <= distLockTol
 
         if isLocked {
             let lockedTitle = isRecording ? "Gravação perfeita — mantém o ritmo" : "Ângulo perfeito — dispara!"
