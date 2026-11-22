@@ -55,6 +55,7 @@ enum ReelExporter {
     static func exportReel(
         videoURLs: [URL],
         look: ReelLook = .original,
+        preserve4K: Bool = true,
         includeSoundDesign: Bool = true,
         includeViralCaptions: Bool = false,
         musicURL: URL? = nil,
@@ -82,7 +83,7 @@ enum ReelExporter {
             preferredTrackID: kCMPersistentTrackID_Invalid
         )
 
-        let renderSize = CGSize(width: 1080, height: 1920)
+        var renderSize = CGSize(width: 1080, height: 1920)
         var clips: [ReelInstruction] = []
         var sharedPortraitTransform: CGAffineTransform?
         var cursor = CMTime.zero
@@ -94,6 +95,12 @@ enum ReelExporter {
             guard let video = try await asset.loadTracks(withMediaType: .video).first else { continue }
             let range = try await video.load(.timeRange)
             guard range.start.isNumeric, range.duration.isNumeric, range.duration.seconds > 0.05 else { continue }
+            if preserve4K, renderSize.width == 1080 {
+                let size = try await video.load(.naturalSize)
+                if min(size.width, size.height) >= 2160, max(size.width, size.height) >= 3840 {
+                    renderSize = CGSize(width: 2160, height: 3840)
+                }
+            }
             sources.append((url, asset, video, range))
             maximumDuration = maximumDuration + range.duration
         }
@@ -201,7 +208,8 @@ enum ReelExporter {
         defer { try? FileManager.default.removeItem(at: outputURL) }
         let needsEffects = look != .original || lut != nil || clips.contains { $0.containsTweening }
         let videoComposition: AVVideoComposition?
-        if let sharedPortraitTransform, !needsEffects {
+        if let sharedPortraitTransform, !needsEffects,
+           preserve4K || clips.first.map({ min($0.size.width, $0.size.height) <= 1080 }) == true {
             // Uniform portrait footage can keep its native dimensions and cadence.
             compVideoTrack.preferredTransform = sharedPortraitTransform
             videoComposition = nil
@@ -647,7 +655,7 @@ private final class ReelCompositor: NSObject, AVVideoCompositing {
             if clip.look == .film35mm {
                 result = ReelExporter.applyFilmGrain(to: result)
             }
-            if let cue = clip.cue(at: time), let badge = badge(for: cue) {
+            if let cue = clip.cue(at: time), let badge = badge(for: cue, scale: frame.width / 1080) {
                 let progress = min(1, max(0, (time - cue.start) / 0.10))
                 let scale = CGFloat(0.94 + 0.06 * progress)
                 let pop = badge.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
@@ -660,10 +668,10 @@ private final class ReelCompositor: NSObject, AVVideoCompositing {
         }
     }
 
-    private func badge(for cue: CaptionCue) -> CIImage? {
+    private func badge(for cue: CaptionCue, scale: CGFloat) -> CIImage? {
         let key = NSNumber(value: cue.start)
         if let cached = badges.object(forKey: key) { return cached }
-        guard let image = CaptionService.badge(for: cue) else { return nil }
+        guard let image = CaptionService.badge(for: cue, scale: scale) else { return nil }
         badges.setObject(image, forKey: key)
         return image
     }

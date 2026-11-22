@@ -16,7 +16,7 @@ struct ContentView: View {
     @AppStorage("framepilot.teleprompter.speed") private var teleprompterSpeed: Double = 28.0
 
     private var isAnyProFeatureActive: Bool {
-        engine.exposureBias != 0 ||
+        engine.whiteBalanceLocked || engine.showHighlights || engine.exposureBias != 0 ||
         engine.timerOption != .off ||
         engine.aspectMask != .full ||
         engine.isVirtualDollyActive ||
@@ -29,7 +29,9 @@ struct ContentView: View {
         ZStack {
             // Native Apple Pro Camera preview with tap-to-focus, long-press AE/AF lock & pinch-to-zoom
             ProCameraPreviewView(
+                highlights: engine.highlights,
                 session: engine.captureSession,
+                onInspectFocus: { engine.inspectFocus(at: $0, in: $1) },
                 onFocusTap: { devicePoint, screenPoint in
                     engine.focus(at: devicePoint, screenPoint: screenPoint)
                 },
@@ -58,6 +60,9 @@ struct ContentView: View {
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
             }
+
+            FocusLoupeView(loupe: engine.focusLoupe)
+                .allowsHitTesting(false)
 
             // Tap-to-focus yellow reticle
             if let focusPoint = engine.focusIndicatorPoint {
@@ -249,12 +254,22 @@ struct ContentView: View {
                         HStack(spacing: 3) {
                             ForEach(engine.availableLenses, id: \.self) { lens in
                                 let isSelected = abs(engine.activeLens - lens) < 0.15
-                                let label = lens == 0.5 ? "0,5" : "\(Int(lens))"
+                                let label = lens.formatted(.number.precision(.fractionLength(0...1)))
                                 Button {
                                     if !isSelected { lensSelectionFeedback.toggle() }
                                     engine.setLens(lens)
                                 } label: {
-                                    Text(isSelected ? "\(label)×" : label)
+                                    VStack(spacing: 0) {
+                                        Text(isSelected ? "\(label)×" : label)
+                                            .lineLimit(1)
+                                            .minimumScaleFactor(0.8)
+                                        if engine.digitalLensPresets.contains(lens) {
+                                            Text("digital")
+                                                .font(.system(size: 8))
+                                                .lineLimit(1)
+                                                .minimumScaleFactor(0.7)
+                                        }
+                                    }
                                         .font(.system(size: 11, weight: .bold, design: .monospaced))
                                         .foregroundColor(isSelected ? .yellow : .white)
                                         .frame(width: 36, height: 32)
@@ -264,7 +279,7 @@ struct ContentView: View {
                                         .frame(width: 44, height: 44)
                                         .contentShape(Rectangle())
                                 }
-                                .accessibilityLabel("Ampliação \(label) vezes")
+                                .accessibilityLabel(engine.digitalLensPresets.contains(lens) ? "Ampliação digital \(label) vezes" : "Ampliação \(label) vezes")
                                 .accessibilityAddTraits(isSelected ? .isSelected : [])
                             }
                         }
@@ -746,6 +761,20 @@ private struct ProControlsDrawerView: View {
                     }
                     .disabled(engine.isRecording)
                 }
+
+                Button { engine.toggleWhiteBalance() } label: {
+                    ProDrawerTile(icon: "thermometer.medium", title: "Brancos",
+                                  value: engine.whiteBalanceLocked ? "Fixo" : "Auto",
+                                  isActive: engine.whiteBalanceLocked, accentColor: .yellow)
+                }
+                .disabled(!engine.canLockWhiteBalance)
+
+                Button { engine.showHighlights.toggle() } label: {
+                    ProDrawerTile(icon: "sun.max", title: "Altas luzes",
+                                  value: !engine.highlightsAvailable ? "Indisp." : (engine.showHighlights ? "95%" : "Off"),
+                                  isActive: engine.showHighlights && engine.highlightsAvailable, accentColor: .yellow)
+                }
+                .disabled(!engine.highlightsAvailable)
 
                 // 3. Flip Camera
                 Button {

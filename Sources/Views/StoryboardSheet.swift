@@ -186,6 +186,8 @@ struct StoryboardSheet: View {
 
     private var exportOptions: some View {
         Section("Montagem") {
+            Toggle("Preservar 4K na montagem", isOn: $engine.preserve4KInReel)
+                .disabled(engine.isExportingReel)
             Picker(selection: $selectedLook) {
                 ForEach(ReelLook.allCases) { look in
                     Text(look.rawValue).tag(look)

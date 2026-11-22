@@ -163,7 +163,7 @@ enum CaptionService {
     }
 
     /// One tight, single-scale bitmap per active word, cached by the compositor.
-    static func badge(for cue: CaptionCue) -> CIImage? {
+    static func badge(for cue: CaptionCue, scale pixelScale: CGFloat) -> CIImage? {
         let text = NSMutableAttributedString(string: "")
         for (index, word) in cue.words.enumerated() {
             let color: UIColor = index == cue.activeIndex ? .yellow : .white
@@ -177,7 +177,7 @@ enum CaptionService {
         let scale = min(1, maxTextWidth / textSize.width)
         let size = CGSize(width: ceil(textSize.width * scale) + 48, height: ceil(font.lineHeight) + 24)
         let format = UIGraphicsImageRendererFormat()
-        format.scale = 1
+        format.scale = pixelScale
         format.preferredRange = .standard
         let image = UIGraphicsImageRenderer(size: size, format: format).image { renderer in
             UIColor.black.withAlphaComponent(0.83).setFill()

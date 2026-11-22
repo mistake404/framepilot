@@ -8,11 +8,20 @@ import Vision
 import UIKit
 
 enum VideoQuality: String, CaseIterable {
+    case hd1080p30 = "1080p 30"
     case hd1080p60 = "1080p 60"
     case uhd4K30 = "4K 30"
 
     var next: VideoQuality {
-        self == .hd1080p60 ? .uhd4K30 : .hd1080p60
+        switch self {
+        case .uhd4K30: return .hd1080p30
+        case .hd1080p30: return .hd1080p60
+        case .hd1080p60: return .uhd4K30
+        }
+    }
+
+    var frameRate: Int32 {
+        self == .hd1080p60 ? 60 : 30
     }
 }
 
@@ -72,6 +81,25 @@ final class HUDTelemetryStore: ObservableObject {
 final class SpatialCameraEngine: NSObject, ObservableObject {
     let captureSession = AVCaptureSession()
     let hudStore = HUDTelemetryStore()
+    let highlights = HighlightRegions()
+    let focusLoupe = FocusLoupe()
+    @Published private(set) var digitalLensPresets: Set<Double> = []
+    @Published private(set) var whiteBalanceLocked = false
+    @Published private(set) var canLockWhiteBalance = false
+    @Published private(set) var highlightsAvailable = false
+    @Published var showHighlights = false {
+        didSet {
+            sensorLock.lock()
+            highlightsRequested = showHighlights
+            latestHighlights = []
+            sensorLock.unlock()
+            highlights.rects = []
+        }
+    }
+    private var highlightsRequested = false
+    private var latestHighlights: [CGRect] = []
+    private var lastHighlightTime: CFTimeInterval = 0
+    private var automaticZoom: Double?
 
     @Published var customPacks: [ScenePack] = CustomPackStore.load()
     @Published var selectedPack: ScenePack = ScenePack.presets[0]
@@ -117,6 +145,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     @Published var focusMarkB: FocusMark?
     @Published var isRackFocusing: Bool = false
     @Published var isVirtualDollyActive: Bool = false
+    @Published var preserve4KInReel = true
     @Published var includeSoundDesign: Bool = true
     @Published var includeDynamicCaptions: Bool = false
     @Published var editedTranscriptions: [URL: CaptionService.Transcription] = [:]
@@ -134,6 +163,8 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     // UI state lives on the main queue. Capture graph and lens commands live on sessionQueue.
     private var startID: UUID?
     private var hudDevice: AVCaptureDevice?
+    private var pointLockID: UUID?
+    private var pendingPointLock: (device: AVCaptureDevice, deadline: CFTimeInterval)?
     private var rackID: UUID?
     private var markGeneration: UInt = 0
     private var captureBusy = false
@@ -258,6 +289,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         super.init()
         currentTargetShot = activeShot
         if let first = activeShot {
+            automaticZoom = first.recommendedLens
             captureMode = first.preferredMode
         }
         observeThermalState()
@@ -458,6 +490,8 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     }
 
     private func stopTelemetry() {
+        focusLoupe.dismiss()
+        highlights.rects = []
         hudTimer?.cancel()
         hudTimer = nil
         motionManager.stopDeviceMotionUpdates()
@@ -485,7 +519,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         let photos = requestedMode == .photo
         let primaryClass: AnyClass = photos ? AVCapturePhotoOutput.self : AVCaptureMovieFileOutput.self
         let fourK = requestedQuality == .uhd4K30
-        let fps: Double = fourK ? 30 : 60
+        let fps = Double(requestedQuality.frameRate)
         var best: AVCaptureDevice.Format?
         var bestScore: (Int64, Int, Int, Int, Int64) = (-1, 0, 0, 0, 0)
         for format in device.formats {
@@ -589,7 +623,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
             defer { device.unlockForConfiguration() }
             device.activeFormat = format
             if !photos {
-                let duration = CMTime(value: 1, timescale: requestedQuality == .uhd4K30 ? 30 : 60)
+                let duration = CMTime(value: 1, timescale: requestedQuality.frameRate)
                 device.activeVideoMinFrameDuration = duration
                 device.activeVideoMaxFrameDuration = duration
             } else {
@@ -600,7 +634,11 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
                 device.activeDepthDataFormat = depth
             }
             if switched {
-                wideZoomFactor = device.virtualDeviceSwitchOverVideoZoomFactors.first?.doubleValue ?? 1
+                wideZoomFactor = device.constituentDevices.contains { $0.deviceType == .builtInUltraWideCamera }
+                    ? (device.virtualDeviceSwitchOverVideoZoomFactors.first?.doubleValue ?? 1) : 1
+                if device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
+                    device.whiteBalanceMode = .continuousAutoWhiteBalance
+                }
                 device.videoZoomFactor = min(device.maxAvailableVideoZoomFactor,
                                               max(device.minAvailableVideoZoomFactor, CGFloat(wideZoomFactor)))
                 if device.isFocusModeSupported(.continuousAutoFocus) { device.focusMode = .continuousAutoFocus }
@@ -657,11 +695,19 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         videoDataOutput.alwaysDiscardsLateVideoFrames = true
         videoDataOutput.automaticallyConfiguresOutputBufferDimensions = false
         videoDataOutput.deliversPreviewSizedOutputBuffers = true
-        _ = attach(videoDataOutput)
+        if attach(videoDataOutput) {
+            let available = videoDataOutput.availableVideoPixelFormatTypes
+            if let type = [kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange]
+                .first(where: { available.contains($0) }) {
+                videoDataOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: type]
+            }
+        }
+        if let automaticZoom { applyAutomaticZoom(automaticZoom, on: device) }
 
         let low = Double(device.minAvailableVideoZoomFactor) / wideZoomFactor
         let high = Double(device.maxAvailableVideoZoomFactor) / wideZoomFactor
-        let lenses = [0.5, 1.0, 2.0, 5.0].filter { $0 >= low && $0 <= high }
+        let lenses = zoomPresets(on: device).filter { $0 >= low && $0 <= high }
+        let digitalPresets = Set(lenses.filter { !preservesDetail($0, on: device) })
         let lens = Double(device.videoZoomFactor) / wideZoomFactor
         sensorLock.lock()
         if isFrontCameraFlag != (device.position == .front) {
@@ -673,12 +719,19 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
             self.hudDevice = device
             self.cameraPosition = device.position
             self.pinchLensRange = low...high
+            self.digitalLensPresets = digitalPresets
+            self.canLockWhiteBalance = device.isWhiteBalanceModeSupported(.locked) && device.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance)
+            self.whiteBalanceLocked = device.whiteBalanceMode == .locked
             self.availableLenses = lenses.isEmpty ? [lens] : lenses
             self.activeLens = lens
             if switched {
                 self.focusMarkA = nil
                 self.focusMarkB = nil
+                self.pointLockID = nil
+                self.pendingPointLock = nil
+                self.focusIndicatorPoint = nil
                 self.isAEAFLocked = false
+                self.focusLoupe.dismiss()
             }
         }
         return true
@@ -709,6 +762,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         visionConnection = nil
         smoothedDistanceMeters = nil
         latestFaceRect = nil
+        latestHighlights = []
         sensorLock.unlock()
     }
 
@@ -742,8 +796,16 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         visionConnection = enableVision ? vision : nil
         if !enableDepth { smoothedDistanceMeters = nil }
         if !enableVision { latestFaceRect = nil }
+        latestHighlights = []
         sensorLock.unlock()
-        DispatchQueue.main.async { self.hudStore.telemetry.hasLidarSupport = enableDepth }
+        let settings: [String: Any]? = videoDataOutput.videoSettings
+        let highlightFormat = settings?[kCVPixelBufferPixelFormatTypeKey as String] as? NSNumber
+        let canShowHighlights = enableVision && HighlightRegions.supports(highlightFormat?.uint32Value ?? 0)
+        DispatchQueue.main.async {
+            self.hudStore.telemetry.hasLidarSupport = enableDepth
+            self.highlightsAvailable = canShowHighlights
+            self.highlights.rects = []
+        }
     }
 
     private func limitDepthFrameRate(on device: AVCaptureDevice, fps: Int32) {
@@ -780,11 +842,64 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         timerOption = timerOption.next
     }
 
+    private func zoomPresets(on device: AVCaptureDevice) -> [Double] {
+        let switches = device.virtualDeviceSwitchOverVideoZoomFactors.map { $0.doubleValue / wideZoomFactor }
+        return Set([0.5, 1, 2, 5] + switches).sorted()
+    }
+
+    private func preservesDetail(_ multiplier: Double, on device: AVCaptureDevice) -> Bool {
+        let raw = CGFloat(multiplier * wideZoomFactor)
+        let format = device.activeFormat
+        let nativeStops = format.secondaryNativeResolutionZoomFactors + device.virtualDeviceSwitchOverVideoZoomFactors.map { CGFloat($0.doubleValue) }
+        return raw <= format.videoZoomFactorUpscaleThreshold || nativeStops.contains { abs($0 - raw) < 0.001 }
+    }
+
+    private func applyAutomaticZoom(_ requested: Double, on device: AVCaptureDevice) {
+        let minimum = Double(device.minAvailableVideoZoomFactor) / wideZoomFactor
+        let maximum = Double(device.maxAvailableVideoZoomFactor) / wideZoomFactor
+        let stops = zoomPresets(on: device) + [minimum, requested]
+        let chosen = stops.filter {
+            $0 >= minimum && $0 <= min(requested, maximum) && preservesDetail($0, on: device)
+        }.max() ?? minimum
+        do {
+            try device.lockForConfiguration()
+            defer { device.unlockForConfiguration() }
+            device.videoZoomFactor = CGFloat(chosen * wideZoomFactor)
+            DispatchQueue.main.async { self.activeLens = chosen }
+        } catch { showToast("Não foi possível ajustar o zoom do plano") }
+    }
+
+    private func selectAutomaticZoom(_ multiplier: Double) {
+        sessionQueue.async {
+            self.automaticZoom = multiplier
+            if self.isConfigured, let device = self.videoDevice {
+                self.applyAutomaticZoom(multiplier, on: device)
+            }
+        }
+    }
+
+    func toggleWhiteBalance() {
+        sessionQueue.async {
+            guard let device = self.videoDevice else { return }
+            let mode: AVCaptureDevice.WhiteBalanceMode = device.whiteBalanceMode == .locked ? .continuousAutoWhiteBalance : .locked
+            guard device.isWhiteBalanceModeSupported(mode) else { return }
+            do {
+                try device.lockForConfiguration()
+                device.whiteBalanceMode = mode
+                device.unlockForConfiguration()
+                let locked = device.whiteBalanceMode == .locked
+                DispatchQueue.main.async { self.whiteBalanceLocked = locked }
+            } catch { self.showToast("Não foi possível ajustar o balanço de brancos") }
+        }
+    }
+
     func setLens(_ multiplier: Double) {
+        focusLoupe.dismiss()
         guard multiplier.isFinite, multiplier > 0 else { return }
         activeLens = multiplier
         sessionQueue.async { [weak self] in
             guard let self, let device = self.videoDevice else { return }
+            self.automaticZoom = nil
             let rawFactor = multiplier * self.wideZoomFactor
             let clamped = max(
                 device.minAvailableVideoZoomFactor,
@@ -800,6 +915,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
 
     func handlePinchZoom(scale: CGFloat, state: UIGestureRecognizer.State) {
         if state == .began {
+            focusLoupe.dismiss()
             pinchStartLens = activeLens
             return
         }
@@ -811,6 +927,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
 
         sessionQueue.async { [weak self] in
             guard let self, let device = self.videoDevice else { return }
+            self.automaticZoom = nil
             let rawFactor = target * self.wideZoomFactor
             let clamped = max(
                 device.minAvailableVideoZoomFactor,
@@ -824,6 +941,11 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         }
     }
 
+    func inspectFocus(at point: CGPoint, in preview: AVCaptureVideoPreviewLayer) {
+        guard !captureBusy, !isRecording, startID != nil else { return }
+        focusLoupe.inspect(at: point, in: preview)
+    }
+
     func focus(at devicePoint: CGPoint, screenPoint: CGPoint) {
         guard (0...1).contains(devicePoint.x), (0...1).contains(devicePoint.y) else { return }
         cancelRackFocus()
@@ -831,7 +953,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
             self.isAEAFLocked = false
             self.focusIndicatorPoint = screenPoint
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { [weak self] in
-                if self?.focusIndicatorPoint == screenPoint {
+                if self?.pointLockID == nil, self?.focusIndicatorPoint == screenPoint {
                     self?.focusIndicatorPoint = nil
                 }
             }
@@ -863,30 +985,80 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     func lockFocusAndExposure(at devicePoint: CGPoint, screenPoint: CGPoint) {
         guard (0...1).contains(devicePoint.x), (0...1).contains(devicePoint.y) else { return }
         cancelRackFocus()
-        DispatchQueue.main.async {
-            self.isAEAFLocked = true
-            self.focusIndicatorPoint = screenPoint
-            self.impactFeedback.impactOccurred()
-            self.showToast("AE/AF LOCK ativado — toca para destravar")
-        }
-
+        let id = UUID()
+        pointLockID = id
+        focusIndicatorPoint = screenPoint
+        let selectedDevice = hudDevice
         sessionQueue.async { [weak self] in
-            guard let self, let device = self.videoDevice else { return }
+            guard let self else { return }
+            guard let device = self.videoDevice, device === selectedDevice, self.captureSession.isRunning,
+                  device.isFocusPointOfInterestSupported, device.isExposurePointOfInterestSupported,
+                  device.isFocusModeSupported(.autoFocus), device.isExposureModeSupported(.autoExpose) else {
+                self.reportPointLockFailure(id)
+                return
+            }
             do {
                 try device.lockForConfiguration()
-                if device.isFocusPointOfInterestSupported {
-                    device.focusPointOfInterest = devicePoint
-                }
-                if device.isFocusModeSupported(.locked) {
-                    device.focusMode = .locked
-                }
-                if device.isExposurePointOfInterestSupported {
-                    device.exposurePointOfInterest = devicePoint
-                }
-                if device.isExposureModeSupported(.locked) {
-                    device.exposureMode = .locked
-                }
+                device.focusPointOfInterest = devicePoint
+                device.exposurePointOfInterest = devicePoint
+                device.focusMode = .autoFocus
+                device.exposureMode = .autoExpose
                 device.unlockForConfiguration()
+                DispatchQueue.main.async {
+                    guard self.pointLockID == id else { return }
+                    self.pendingPointLock = (device, CACurrentMediaTime() + 5)
+                }
+            } catch {
+                self.reportPointLockFailure(id)
+            }
+        }
+    }
+
+    private func reportPointLockFailure(_ id: UUID) {
+        DispatchQueue.main.async {
+            guard self.pointLockID == id else { return }
+            self.pointLockID = nil
+            self.focusIndicatorPoint = nil
+            self.showToast("Bloqueio de foco e exposição indisponível")
+        }
+    }
+
+    private func updatePointLock() {
+        guard let pending = pendingPointLock else { return }
+        let device = pending.device
+        guard device === hudDevice else {
+            pointLockID = nil
+            pendingPointLock = nil
+            isAEAFLocked = false
+            focusIndicatorPoint = nil
+            return
+        }
+        if device.focusMode == .locked, device.exposureMode == .locked,
+           !device.isAdjustingFocus, !device.isAdjustingExposure {
+            pendingPointLock = nil
+            isAEAFLocked = true
+            impactFeedback.impactOccurred()
+            showToast("AE/AF LOCK ativado — toca para destravar")
+        } else if CACurrentMediaTime() >= pending.deadline {
+            cancelPointLock()
+            showToast("O foco e a exposição não estabilizaram")
+        }
+    }
+
+    private func cancelPointLock() {
+        guard pointLockID != nil else { return }
+        pointLockID = nil
+        pendingPointLock = nil
+        isAEAFLocked = false
+        focusIndicatorPoint = nil
+        let selectedDevice = hudDevice
+        sessionQueue.async { [weak self] in
+            guard let device = self?.videoDevice, device === selectedDevice else { return }
+            do {
+                try device.lockForConfiguration()
+                defer { device.unlockForConfiguration() }
+                if device.isFocusModeSupported(.continuousAutoFocus) { device.focusMode = .continuousAutoFocus }
+                if device.isExposureModeSupported(.continuousAutoExposure) { device.exposureMode = .continuousAutoExposure }
             } catch {}
         }
     }
@@ -940,9 +1112,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         sessionTakes.removeAll()
         if let first = pack.shots.first {
             setCaptureMode(first.preferredMode)
-            if availableLenses.contains(first.recommendedLens) {
-                setLens(first.recommendedLens)
-            }
+            selectAutomaticZoom(first.recommendedLens)
         }
         currentTargetShot = activeShot
         lastAdviceUpdate = 0
@@ -1106,6 +1276,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
             return
         }
 
+        let preserve4K = preserve4KInReel
         let soundDesign = includeSoundDesign
         let captions = includeDynamicCaptions
         let music = selectedMusicURL
@@ -1121,6 +1292,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
                 try await ReelExporter.exportReel(
                     videoURLs: orderedURLs,
                     look: look,
+                    preserve4K: preserve4K,
                     includeSoundDesign: soundDesign,
                     includeViralCaptions: captions,
                     musicURL: music,
@@ -1188,6 +1360,8 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     }
 
     private func cancelRackFocus() {
+        focusLoupe.dismiss()
+        cancelPointLock()
         rackID = nil
         isRackFocusing = false
         currentRackFocusProgress = nil
@@ -1226,6 +1400,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
             return
         }
         let id = UUID()
+        cancelPointLock()
         let markedDevice = hudDevice
         rackID = id
         isRackFocusing = true
@@ -1321,9 +1496,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         activeShotIndex = index
         let shot = selectedPack.shots[index]
         setCaptureMode(shot.preferredMode)
-        if availableLenses.contains(shot.recommendedLens) {
-            setLens(shot.recommendedLens)
-        }
+        selectAutomaticZoom(shot.recommendedLens)
         currentTargetShot = shot
         lastAdviceUpdate = 0
         wasLocked = false
@@ -1383,6 +1556,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     }
 
     private func publishHUDTick() {
+        updatePointLock()
         let orientation = currentVisionOrientation()
         sensorLock.lock()
         visionOrientation = orientation
@@ -1390,10 +1564,12 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         let roll = smoothedRollDegrees
         let motionSpeed = smoothedMotionSpeed
         let distance = smoothedDistanceMeters
+        let highlightRects = latestHighlights
         let faceRect = latestFaceRect
         let thermal = currentThermalState
         sensorLock.unlock()
 
+        if highlights.rects != highlightRects { highlights.rects = highlightRects }
         let motionPace = ShotCoachEngine.classifyMotionPace(speedDegPerSec: motionSpeed)
         let iso = Double(hudDevice?.iso ?? 200)
         let lighting: LightingCondition = iso > 900 ? .low : (iso < 60 ? .bright : .balanced)
@@ -1518,6 +1694,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
 
     private func beginCapture() -> Bool {
         guard startID != nil, !captureBusy, !isExportingReel else { return false }
+        focusLoupe.dismiss()
         captureBusy = true
         captureContext = ShotContext(id: activeShot?.id ?? UUID().uuidString,
                                      title: activeShot?.title ?? "Plano Livre", generation: packGeneration)
@@ -1615,9 +1792,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
             activeShotIndex += 1
             let nextShot = selectedPack.shots[activeShotIndex]
             setCaptureMode(nextShot.preferredMode)
-            if availableLenses.contains(nextShot.recommendedLens) {
-                setLens(nextShot.recommendedLens)
-            }
+            selectAutomaticZoom(nextShot.recommendedLens)
             currentTargetShot = nextShot
             lastAdviceUpdate = 0
             wasLocked = false
@@ -1894,6 +2069,7 @@ extension SpatialCameraEngine: AVCaptureVideoDataOutputSampleBufferDelegate {
         let thermal = currentThermalState
         let recording = isRecordingFlag
         let orientation = visionOrientation
+        let wantsHighlights = highlightsRequested
         let enabled = visionConnection === connection
         let generation = analysisGeneration
         sensorLock.unlock()
@@ -1912,9 +2088,17 @@ extension SpatialCameraEngine: AVCaptureVideoDataOutputSampleBufferDelegate {
         }
 
         let now = CACurrentMediaTime()
-        guard now - lastVisionTimestamp >= minInterval else { return }
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
+        if !recording { focusLoupe.render(pixelBuffer, from: output, at: now) }
+        if wantsHighlights, now - lastHighlightTime >= (thermal == .fair ? 0.3 : 0.15) {
+            lastHighlightTime = now
+            let rects = HighlightRegions.sample(pixelBuffer).map { output.metadataOutputRectConverted(fromOutputRect: $0) }
+            sensorLock.lock()
+            if generation == analysisGeneration, highlightsRequested { latestHighlights = rects }
+            sensorLock.unlock()
+        }
+        guard now - lastVisionTimestamp >= minInterval else { return }
         lastVisionTimestamp = now
 
         let handler = VNImageRequestHandler(
