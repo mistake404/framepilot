@@ -6,6 +6,7 @@ struct DirectorHUDView: View {
     let overlayMode: OverlayMode
     let aspectMask: AspectMask
     let isRecording: Bool
+    let showFramingGuide: Bool
 
     var body: some View {
         let telemetry = hudStore.telemetry
@@ -28,6 +29,12 @@ struct DirectorHUDView: View {
                     .allowsHitTesting(false)
             case .none:
                 EmptyView()
+            }
+
+            // Subtle visual framing silhouette for the active shot kind
+            if showFramingGuide, !isRecording, let shot = activeShot {
+                ShotFramingGuideOverlay(kind: shot.kind)
+                    .allowsHitTesting(false)
             }
 
             // Vision Face Tracking Brackets
@@ -794,5 +801,93 @@ private struct DirectorAlertPill: View {
                 .fill(Color.black.opacity(0.75))
                 .overlay(Capsule().stroke(tint.opacity(0.7), lineWidth: 1))
         )
+    }
+}
+
+private struct ShotFramingGuideOverlay: View {
+    let kind: ShotKind
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let h = geo.size.height
+            let strokeColor = Color.white.opacity(0.28)
+
+            ZStack {
+                switch kind {
+                case .closeUp:
+                    // Eye-line + head & shoulders silhouette
+                    Path { p in
+                        let eyeY = h * 0.34
+                        p.move(to: CGPoint(x: w * 0.20, y: eyeY))
+                        p.addLine(to: CGPoint(x: w * 0.80, y: eyeY))
+                    }
+                    .stroke(strokeColor, style: StrokeStyle(lineWidth: 1, dash: [6, 5]))
+
+                    Ellipse()
+                        .stroke(strokeColor, style: StrokeStyle(lineWidth: 1.3, dash: [8, 6]))
+                        .frame(width: w * 0.44, height: h * 0.25)
+                        .position(x: w * 0.50, y: h * 0.36)
+
+                    Path { p in
+                        p.move(to: CGPoint(x: w * 0.14, y: h * 0.68))
+                        p.addQuadCurve(to: CGPoint(x: w * 0.86, y: h * 0.68), control: CGPoint(x: w * 0.50, y: h * 0.49))
+                    }
+                    .stroke(strokeColor, style: StrokeStyle(lineWidth: 1.3, dash: [8, 6]))
+
+                case .medium:
+                    // Upper-body portrait silhouette
+                    Ellipse()
+                        .stroke(strokeColor, style: StrokeStyle(lineWidth: 1.2, dash: [7, 5]))
+                        .frame(width: w * 0.28, height: h * 0.16)
+                        .position(x: w * 0.50, y: h * 0.30)
+
+                    Path { p in
+                        p.move(to: CGPoint(x: w * 0.22, y: h * 0.72))
+                        p.addQuadCurve(to: CGPoint(x: w * 0.78, y: h * 0.72), control: CGPoint(x: w * 0.50, y: h * 0.38))
+                    }
+                    .stroke(strokeColor, style: StrokeStyle(lineWidth: 1.2, dash: [7, 5]))
+
+                case .detail, .highAngle:
+                    // Centered macro / flat-lay target frame
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(strokeColor, style: StrokeStyle(lineWidth: 1.3, dash: [10, 6]))
+                        .frame(width: w * 0.64, height: w * 0.64)
+                        .position(x: w * 0.50, y: h * 0.48)
+
+                case .lowAngle:
+                    // Upward tilt directional guide
+                    VStack(spacing: 6) {
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 18, weight: .semibold))
+                        Text("TILT-UP")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    }
+                    .foregroundColor(strokeColor)
+                    .position(x: w * 0.50, y: h * 0.34)
+
+                case .establishing:
+                    // Horizon guide line
+                    Path { p in
+                        let y = h * 0.44
+                        p.move(to: CGPoint(x: w * 0.12, y: y))
+                        p.addLine(to: CGPoint(x: w * 0.88, y: y))
+                    }
+                    .stroke(strokeColor, style: StrokeStyle(lineWidth: 1.1, dash: [8, 6]))
+
+                case .reveal, .orbit:
+                    // Horizontal / curved movement direction arrow
+                    HStack(spacing: 6) {
+                        Text(kind == .orbit ? "ÓRBITA" : "TRAVELLING")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        Image(systemName: kind == .orbit ? "arrow.triangle.2.circlepath" : "arrow.right")
+                            .font(.system(size: 14, weight: .semibold))
+                    }
+                    .foregroundColor(strokeColor)
+                    .position(x: w * 0.50, y: h * 0.64)
+                }
+            }
+        }
+        .ignoresSafeArea()
     }
 }

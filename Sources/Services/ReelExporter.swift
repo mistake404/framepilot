@@ -33,7 +33,7 @@ struct SessionTake: Identifiable {
     let durationSeconds: Double
 }
 
-struct ClipTrim: Equatable {
+struct ClipTrim: Equatable, Codable {
     var startSeconds: Double
     var endSeconds: Double
 }
@@ -70,7 +70,9 @@ enum ReelExporter {
         removeSilences: Bool = false,
         customLUTURL: URL? = nil,
         precomputedTranscriptions: [URL: CaptionService.Transcription] = [:],
-        clipTrims: [URL: ClipTrim] = [:]
+        clipTrims: [URL: ClipTrim] = [:],
+        captionStyle: CaptionStyle = .classicBox,
+        captionPosition: CaptionPosition = .bottom
     ) async throws {
         guard !videoURLs.isEmpty else {
             throw ExportError.noVideoClips
@@ -199,7 +201,8 @@ enum ReelExporter {
                 clips.append(ReelInstruction(trackID: compVideoTrack.trackID,
                                              range: CMTimeRange(start: cursor, duration: segment.duration),
                                              size: size, transform: transform, look: look, cues: cues,
-                                             transition: transition, lut: lut))
+                                             transition: transition, lut: lut,
+                                             captionStyle: captionStyle, captionPosition: captionPosition))
                 cursor = cursor + segment.duration
             }
         }
@@ -589,6 +592,8 @@ private final class ReelInstruction: NSObject, AVVideoCompositionInstructionProt
     let cues: [CaptionCue]
     let transition: ReelTransition
     let lut: CubeLUTLoader?
+    let captionStyle: CaptionStyle
+    let captionPosition: CaptionPosition
     var incomingCut: Double?
     var outgoingCut: Double?
     let enablePostProcessing = false
@@ -597,7 +602,8 @@ private final class ReelInstruction: NSObject, AVVideoCompositionInstructionProt
     var requiredSourceTrackIDs: [NSValue]? { [NSNumber(value: trackID)] }
 
     init(trackID: CMPersistentTrackID, range: CMTimeRange, size: CGSize, transform: CGAffineTransform,
-         look: ReelLook, cues: [CaptionCue], transition: ReelTransition, lut: CubeLUTLoader?) {
+         look: ReelLook, cues: [CaptionCue], transition: ReelTransition, lut: CubeLUTLoader?,
+         captionStyle: CaptionStyle, captionPosition: CaptionPosition) {
         self.trackID = trackID
         self.timeRange = range
         self.size = size
@@ -606,6 +612,8 @@ private final class ReelInstruction: NSObject, AVVideoCompositionInstructionProt
         self.cues = cues
         self.transition = transition
         self.lut = lut
+        self.captionStyle = captionStyle
+        self.captionPosition = captionPosition
     }
 
     func cue(at time: Double) -> CaptionCue? {
@@ -672,12 +680,12 @@ private final class ReelCompositor: NSObject, AVVideoCompositing {
             if clip.look == .film35mm {
                 result = ReelExporter.applyFilmGrain(to: result)
             }
-            if let cue = clip.cue(at: time), let badge = badge(for: cue, scale: frame.width / 1080) {
+            if let cue = clip.cue(at: time), let badge = badge(for: cue, scale: frame.width / 1080, style: clip.captionStyle) {
                 let progress = min(1, max(0, (time - cue.start) / 0.10))
                 let scale = CGFloat(0.94 + 0.06 * progress)
                 let pop = badge.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
                 let offset = CGAffineTransform(translationX: frame.midX - pop.extent.midX,
-                                               y: frame.height * 0.26 - pop.extent.midY)
+                                               y: frame.height * clip.captionPosition.normalizedY - pop.extent.midY)
                 result = pop.transformed(by: offset).composited(over: result)
             }
             context.render(result, to: output, bounds: frame, colorSpace: colorSpace)
@@ -685,10 +693,10 @@ private final class ReelCompositor: NSObject, AVVideoCompositing {
         }
     }
 
-    private func badge(for cue: CaptionCue, scale: CGFloat) -> CIImage? {
+    private func badge(for cue: CaptionCue, scale: CGFloat, style: CaptionStyle) -> CIImage? {
         let key = NSNumber(value: cue.start)
         if let cached = badges.object(forKey: key) { return cached }
-        guard let image = CaptionService.badge(for: cue, scale: scale) else { return nil }
+        guard let image = CaptionService.badge(for: cue, scale: scale, style: style) else { return nil }
         badges.setObject(image, forKey: key)
         return image
     }

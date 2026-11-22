@@ -106,6 +106,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     @Published var selectedPack: ScenePack = ScenePack.presets[0]
     @Published var activeShotIndex: Int = 0
     @Published var freeModeTargetKind: ShotKind? = nil
+    @Published var freeModeTargetDuration: Double = 0
     @Published var freeModeTakeOrder: [String] = []
     @Published var completedShotIds: Set<String> = []
     @Published var sessionTakes: [String: SessionTake] = [:]
@@ -151,8 +152,17 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     @Published var preserve4KInReel = true
     @Published var includeSoundDesign: Bool = true
     @Published var includeDynamicCaptions: Bool = false
+    @Published var captionStyle: CaptionStyle = .classicBox {
+        didSet { persistSessionIfReady() }
+    }
+    @Published var captionPosition: CaptionPosition = .bottom {
+        didSet { persistSessionIfReady() }
+    }
     @Published var editedTranscriptions: [URL: CaptionService.Transcription] = [:]
-    @Published var clipTrims: [URL: ClipTrim] = [:]
+    @Published var clipTrims: [URL: ClipTrim] = [:] {
+        didSet { persistSessionIfReady() }
+    }
+    @Published var showFramingGuide: Bool = true
     @Published var voiceCoachingEnabled: Bool = false {
         didSet {
             if !voiceCoachingEnabled { voiceCoach.stopImmediately() }
@@ -267,9 +277,8 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
 
     // Main-queue ownership, including all delegate handoffs.
     private var captureContext: ShotContext?
-    private let clipDirectory = FileManager.default.temporaryDirectory
-        .appendingPathComponent("FramePilotSession", isDirectory: true)
-        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    private let clipDirectory = SessionPersistence.sessionDirectory
+    private var isRestoringSession = false
     private var recordingURL: URL?
     private var recordingTarget: Double?
     private var autoStopRecording = false
@@ -297,7 +306,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
             kind: kind,
             preferredMode: captureMode,
             recommendedLens: activeLens,
-            targetDurationSeconds: 0,
+            targetDurationSeconds: freeModeTargetDuration,
             targetDistanceRange: kind.defaultDistanceRange,
             targetPitchRange: kind.defaultPitchRange,
             maxRollDegrees: 3.0,
@@ -307,7 +316,8 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     }
 
     var targetDurationProgress: Double {
-        guard isRecording, let target = activeShot?.targetDurationSeconds, target > 0 else {
+        let target = activeShot?.targetDurationSeconds ?? freeModeTargetDuration
+        guard isRecording, target > 0 else {
             return 0
         }
         return min(1.0, recordingElapsed / target)
@@ -330,6 +340,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
 
     override init() {
         super.init()
+        restorePersistedSession()
         currentTargetShot = activeShot
         if let first = activeShot {
             automaticZoom = first.recommendedLens
@@ -1174,6 +1185,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         currentTargetShot = activeShot
         lastAdviceUpdate = 0
         wasLocked = false
+        persistSessionIfReady()
     }
 
     func addCustomPack(_ pack: ScenePack) {
@@ -1294,6 +1306,141 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         currentTargetShot = activeShot
         lastAdviceUpdate = 0
         wasLocked = false
+        persistSessionIfReady()
+    }
+
+    func cycleFreeModeDuration() {
+        guard selectedPack.shots.isEmpty else { return }
+        let options: [Double] = [0, 2, 3, 5, 10]
+        let nextIndex = ((options.firstIndex(of: freeModeTargetDuration) ?? -1) + 1) % options.count
+        freeModeTargetDuration = options[nextIndex]
+        currentTargetShot = activeShot
+        persistSessionIfReady()
+    }
+
+    func clearFreeModeSession() {
+        guard selectedPack.shots.isEmpty, !captureBusy, !isExportingReel else { return }
+        packGeneration = UUID()
+        clearSessionFiles()
+        freeModeTakeOrder.removeAll()
+        sessionTakes.removeAll()
+        completedShotIds.removeAll()
+        continuityReference = nil
+        dismissTakeVerdict()
+        persistSessionIfReady()
+        showToast("Sessão do Modo Livre limpa")
+    }
+
+    private func persistSessionIfReady() {
+        guard !isRestoringSession else { return }
+        let takes = sessionTakes.values.map { take in
+            PersistedTake(
+                shotId: take.shotId,
+                shotTitle: take.shotTitle,
+                isVideo: take.isVideo,
+                filename: take.fileURL?.lastPathComponent,
+                durationSeconds: take.durationSeconds
+            )
+        }
+        var persistedTrims: [String: ClipTrim] = [:]
+        for (url, trim) in clipTrims {
+            persistedTrims[url.lastPathComponent] = trim
+        }
+        let snapshot = PersistedSession(
+            packId: selectedPack.id,
+            activeShotIndex: activeShotIndex,
+            freeModeTargetKind: freeModeTargetKind,
+            freeModeTargetDuration: freeModeTargetDuration,
+            freeModeTakeOrder: freeModeTakeOrder,
+            completedShotIds: Array(completedShotIds),
+            takes: takes,
+            trims: persistedTrims,
+            captionStyle: captionStyle,
+            captionPosition: captionPosition
+        )
+        SessionPersistence.save(snapshot)
+    }
+
+    private func restorePersistedSession() {
+        guard let saved = SessionPersistence.load() else { return }
+        isRestoringSession = true
+        defer { isRestoringSession = false }
+
+        if let pack = allPacks.first(where: { $0.id == saved.packId }) {
+            selectedPack = pack
+        }
+        activeShotIndex = selectedPack.shots.isEmpty
+            ? 0
+            : max(0, min(saved.activeShotIndex, selectedPack.shots.count - 1))
+        freeModeTargetKind = saved.freeModeTargetKind
+        freeModeTargetDuration = saved.freeModeTargetDuration
+        captionStyle = saved.captionStyle
+        captionPosition = saved.captionPosition
+
+        var restoredTakes: [String: SessionTake] = [:]
+        var restoredTrims: [URL: ClipTrim] = [:]
+        var validVideoURLs: [(shotId: String, url: URL, duration: Double)] = []
+
+        for take in saved.takes {
+            if take.isVideo {
+                guard let name = take.filename else { continue }
+                let url = clipDirectory.appendingPathComponent(name)
+                guard FileManager.default.fileExists(atPath: url.path) else { continue }
+                restoredTakes[take.shotId] = SessionTake(
+                    shotId: take.shotId,
+                    shotTitle: take.shotTitle,
+                    isVideo: true,
+                    fileURL: url,
+                    thumbnail: nil,
+                    durationSeconds: take.durationSeconds
+                )
+                if let trim = saved.trims[name] {
+                    restoredTrims[url] = trim
+                }
+                validVideoURLs.append((take.shotId, url, take.durationSeconds))
+            } else {
+                restoredTakes[take.shotId] = SessionTake(
+                    shotId: take.shotId,
+                    shotTitle: take.shotTitle,
+                    isVideo: false,
+                    fileURL: nil,
+                    thumbnail: nil,
+                    durationSeconds: take.durationSeconds
+                )
+            }
+        }
+
+        sessionTakes = restoredTakes
+        clipTrims = restoredTrims
+        freeModeTakeOrder = saved.freeModeTakeOrder.filter { restoredTakes[$0] != nil }
+        completedShotIds = Set(saved.completedShotIds.filter { restoredTakes[$0] != nil })
+
+        // Regenerate thumbnails asynchronously for restored video clips.
+        if !validVideoURLs.isEmpty {
+            let generation = packGeneration
+            Task {
+                for item in validVideoURLs {
+                    let asset = AVURLAsset(url: item.url)
+                    let thumb = await Self.extractLastVideoFrame(asset: asset, seconds: item.duration)
+                    await MainActor.run {
+                        guard self.packGeneration == generation,
+                              let existing = self.sessionTakes[item.shotId],
+                              existing.fileURL == item.url else { return }
+                        self.sessionTakes[item.shotId] = SessionTake(
+                            shotId: existing.shotId,
+                            shotTitle: existing.shotTitle,
+                            isVideo: existing.isVideo,
+                            fileURL: existing.fileURL,
+                            thumbnail: thumb,
+                            durationSeconds: existing.durationSeconds
+                        )
+                        if self.ghostImage == nil, let thumb {
+                            self.ghostImage = thumb
+                        }
+                    }
+                }
+            }
+        }
     }
 
     func removeFreeModeTake(id: String) {
@@ -1306,6 +1453,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
             try? FileManager.default.removeItem(at: url)
         }
         sessionTakes.removeValue(forKey: id)
+        persistSessionIfReady()
     }
 
     func moveFreeModeTakes(from source: IndexSet, to destination: Int) {
@@ -1319,6 +1467,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         let clamped = max(0, min(reordered.count, adjustedDestination))
         reordered.insert(contentsOf: moving, at: clamped)
         freeModeTakeOrder = reordered
+        persistSessionIfReady()
     }
 
     func prepareCaptionsForEditing() {
@@ -1371,6 +1520,8 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         let lut = selectedLUTURL
         let precomputed = editedTranscriptions
         let trims = clipTrims
+        let capStyle = captionStyle
+        let capPosition = captionPosition
         isExportingReel = true
         Task {
             do {
@@ -1387,7 +1538,9 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
                     removeSilences: removeSilences,
                     customLUTURL: lut,
                     precomputedTranscriptions: precomputed,
-                    clipTrims: trims
+                    clipTrims: trims,
+                    captionStyle: capStyle,
+                    captionPosition: capPosition
                 )
                 await MainActor.run {
                     self.isExportingReel = false
@@ -1587,6 +1740,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         currentTargetShot = shot
         lastAdviceUpdate = 0
         wasLocked = false
+        persistSessionIfReady()
     }
 
     // MARK: - CoreMotion (Power-Efficient 30Hz Background Sampling)
@@ -1739,10 +1893,11 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         next.isAudioClipping = isAudioClipping
         next.hasAudioMonitor = hasAudioMonitor
         next.continuityAlert = continuityAlert
-        if isRecording, let targetSec = self.activeShot?.targetDurationSeconds, targetSec.isFinite, targetSec > 0 {
+        let effectiveTarget = self.activeShot?.targetDurationSeconds ?? self.freeModeTargetDuration
+        if isRecording, effectiveTarget.isFinite, effectiveTarget > 0 {
             next.recordingElapsed = self.recordingElapsed
-            next.recordingTargetSeconds = targetSec
-            next.recordingProgress = min(1.0, self.recordingElapsed / targetSec)
+            next.recordingTargetSeconds = effectiveTarget
+            next.recordingProgress = min(1.0, self.recordingElapsed / effectiveTarget)
         } else {
             next.recordingElapsed = 0
             next.recordingTargetSeconds = 0
@@ -1900,7 +2055,8 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
         voiceCoach.stopImmediately()
         let clipURL = sessionClipURL()
         recordingURL = clipURL
-        recordingTarget = activeShot?.targetDurationSeconds
+        let freeTarget = freeModeTargetDuration > 0 ? freeModeTargetDuration : nil
+        recordingTarget = activeShot?.targetDurationSeconds ?? freeTarget
         autoStopRecording = autoStopEnabled
         didHitTargetDurationHaptic = false
         takeMetrics.reset()
@@ -1946,6 +2102,7 @@ final class SpatialCameraEngine: NSObject, ObservableObject {
     private func markActiveShotCaptured() {
         guard let shot = activeShot else { return }
         completedShotIds.insert(shot.id)
+        persistSessionIfReady()
         if activeShotIndex + 1 < selectedPack.shots.count {
             activeShotIndex += 1
             let nextShot = selectedPack.shots[activeShotIndex]
@@ -2162,6 +2319,7 @@ extension SpatialCameraEngine: AVCaptureFileOutputRecordingDelegate {
         if selectedPack.shots.isEmpty, !freeModeTakeOrder.contains(shot.id) {
             freeModeTakeOrder.append(shot.id)
         }
+        persistSessionIfReady()
     }
 
     private func saveCapture(_ changes: @escaping () -> Void) {

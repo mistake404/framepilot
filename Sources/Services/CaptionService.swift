@@ -4,6 +4,31 @@ import Speech
 import CoreImage
 import UIKit
 
+enum CaptionStyle: String, CaseIterable, Identifiable, Codable {
+    case classicBox = "Caixa Clássica"
+    case cleanShadow = "Limpo c/ Sombra"
+    case neonCyan = "Editorial Ciano"
+    case warmCinema = "Cinema"
+
+    var id: String { rawValue }
+}
+
+enum CaptionPosition: String, CaseIterable, Identifiable, Codable {
+    case bottom = "Baixo"
+    case center = "Centro"
+    case upper = "Alto"
+
+    var id: String { rawValue }
+
+    var normalizedY: CGFloat {
+        switch self {
+        case .bottom: return 0.24
+        case .center: return 0.46
+        case .upper: return 0.70
+        }
+    }
+}
+
 struct CaptionCue {
     let start: Double
     let end: Double
@@ -163,25 +188,67 @@ enum CaptionService {
     }
 
     /// One tight, single-scale bitmap per active word, cached by the compositor.
-    static func badge(for cue: CaptionCue, scale pixelScale: CGFloat) -> CIImage? {
+    static func badge(for cue: CaptionCue, scale pixelScale: CGFloat, style: CaptionStyle = .classicBox) -> CIImage? {
+        let activeColor: UIColor
+        let baseColor: UIColor
+        let boxColor: UIColor?
+        let useShadow: Bool
+
+        switch style {
+        case .classicBox:
+            activeColor = .yellow
+            baseColor = .white
+            boxColor = UIColor.black.withAlphaComponent(0.83)
+            useShadow = false
+        case .cleanShadow:
+            activeColor = .yellow
+            baseColor = .white
+            boxColor = nil
+            useShadow = true
+        case .neonCyan:
+            activeColor = UIColor(red: 0.22, green: 0.92, blue: 1.0, alpha: 1.0)
+            baseColor = .white
+            boxColor = UIColor.black.withAlphaComponent(0.72)
+            useShadow = false
+        case .warmCinema:
+            activeColor = UIColor(red: 1.0, green: 0.80, blue: 0.36, alpha: 1.0)
+            baseColor = UIColor(red: 0.98, green: 0.96, blue: 0.90, alpha: 1.0)
+            boxColor = UIColor.black.withAlphaComponent(0.56)
+            useShadow = true
+        }
+
+        let shadow = NSShadow()
+        shadow.shadowColor = UIColor.black.withAlphaComponent(0.9)
+        shadow.shadowOffset = CGSize(width: 0, height: 3)
+        shadow.shadowBlurRadius = 8
+
         let text = NSMutableAttributedString(string: "")
         for (index, word) in cue.words.enumerated() {
-            let color: UIColor = index == cue.activeIndex ? .yellow : .white
-            text.append(NSAttributedString(string: (index == 0 ? "" : " ") + word, attributes: [
-                .font: font, .foregroundColor: color
-            ]))
+            let color: UIColor = index == cue.activeIndex ? activeColor : baseColor
+            var attrs: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .foregroundColor: color
+            ]
+            if useShadow {
+                attrs[.shadow] = shadow
+                attrs[.strokeColor] = UIColor.black.withAlphaComponent(0.75)
+                attrs[.strokeWidth] = -2.5
+            }
+            text.append(NSAttributedString(string: (index == 0 ? "" : " ") + word, attributes: attrs))
         }
 
         let textSize = text.size()
         guard textSize.width > 0 else { return nil }
         let scale = min(1, maxTextWidth / textSize.width)
-        let size = CGSize(width: ceil(textSize.width * scale) + 48, height: ceil(font.lineHeight) + 24)
+        let size = CGSize(width: ceil(textSize.width * scale) + 48, height: ceil(font.lineHeight) + 28)
         let format = UIGraphicsImageRendererFormat()
         format.scale = pixelScale
         format.preferredRange = .standard
         let image = UIGraphicsImageRenderer(size: size, format: format).image { renderer in
-            UIColor.black.withAlphaComponent(0.83).setFill()
-            UIBezierPath(roundedRect: CGRect(origin: .zero, size: size), cornerRadius: 20).fill()
+            if let boxColor {
+                boxColor.setFill()
+                UIBezierPath(roundedRect: CGRect(origin: .zero, size: size), cornerRadius: 20).fill()
+            }
             let context = renderer.cgContext
             context.translateBy(x: size.width / 2, y: size.height / 2)
             context.scaleBy(x: scale, y: scale)

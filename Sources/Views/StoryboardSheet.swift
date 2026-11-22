@@ -200,6 +200,12 @@ struct StoryboardSheet: View {
             .onMove { source, destination in
                 engine.moveFreeModeTakes(from: source, to: destination)
             }
+            Button(role: .destructive) {
+                engine.clearFreeModeSession()
+            } label: {
+                Label("Limpar takes do Modo Livre", systemImage: "trash")
+            }
+            .disabled(engine.isExportingReel)
         } header: {
             Text("Modo Livre (arrasta para reordenar)")
         }
@@ -350,6 +356,27 @@ struct StoryboardSheet: View {
             }
             Toggle(isOn: $engine.includeDynamicCaptions) {
                 Label("Legendas dinâmicas", systemImage: "captions.bubble")
+            }
+            if engine.includeDynamicCaptions {
+                Picker(selection: $engine.captionStyle) {
+                    ForEach(CaptionStyle.allCases) { style in
+                        Text(style.rawValue).tag(style)
+                    }
+                } label: {
+                    Label("Estilo das legendas", systemImage: "textformat")
+                }
+                .pickerStyle(.menu)
+                .disabled(engine.isExportingReel)
+
+                Picker(selection: $engine.captionPosition) {
+                    ForEach(CaptionPosition.allCases) { pos in
+                        Text(pos.rawValue).tag(pos)
+                    }
+                } label: {
+                    Label("Posição das legendas", systemImage: "arrow.up.and.down")
+                }
+                .pickerStyle(.segmented)
+                .disabled(engine.isExportingReel)
             }
             if engine.includeDynamicCaptions && engine.recordedVideoCount > 0 {
                 Button {

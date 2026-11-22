@@ -80,7 +80,8 @@ struct ContentView: View {
                 activeShot: engine.activeShot,
                 overlayMode: engine.overlayMode,
                 aspectMask: engine.aspectMask,
-                isRecording: engine.isRecording
+                isRecording: engine.isRecording,
+                showFramingGuide: engine.showFramingGuide
             )
 
             // Big self-timer countdown overlay
@@ -342,7 +343,11 @@ struct ContentView: View {
                 } else {
                     FreeModeShotPickerBar(
                         selectedKind: engine.freeModeTargetKind,
-                        onSelect: { engine.selectFreeModeKind($0) }
+                        targetDuration: engine.freeModeTargetDuration,
+                        takeCount: engine.freeModeTakeOrder.count,
+                        onSelect: { engine.selectFreeModeKind($0) },
+                        onCycleDuration: { engine.cycleFreeModeDuration() },
+                        onOpenStoryboard: { showStoryboardSheet = true }
                     )
                     .padding(.bottom, 12)
                 }
@@ -800,6 +805,13 @@ private struct ProControlsDrawerView: View {
                                   isActive: engine.voiceCoachingEnabled, accentColor: .cyan)
                 }
 
+                Button { engine.showFramingGuide.toggle() } label: {
+                    ProDrawerTile(icon: "person.crop.rectangle",
+                                  title: "Silhueta",
+                                  value: engine.showFramingGuide ? "Ativa" : "Off",
+                                  isActive: engine.showFramingGuide, accentColor: .yellow)
+                }
+
                 // 3. Flip Camera
                 Button {
                     engine.flipCamera()
@@ -993,13 +1005,38 @@ private struct TakeVerdictCard: View {
 
 private struct FreeModeShotPickerBar: View {
     let selectedKind: ShotKind?
+    let targetDuration: Double
+    let takeCount: Int
     let onSelect: (ShotKind?) -> Void
+    let onCycleDuration: () -> Void
+    let onOpenStoryboard: () -> Void
 
     private let selectionFeedback = UISelectionFeedbackGenerator()
+
+    private var durationLabel: String {
+        targetDuration > 0 ? "\(Int(targetDuration))s" : "∞"
+    }
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
+                if takeCount > 0 {
+                    chip(
+                        title: "\(takeCount) \(takeCount == 1 ? "take" : "takes")",
+                        icon: "film.stack",
+                        isSelected: false,
+                        accentBorder: .green
+                    ) {
+                        onOpenStoryboard()
+                    }
+                }
+                chip(
+                    title: durationLabel,
+                    icon: "stopwatch",
+                    isSelected: targetDuration > 0
+                ) {
+                    onCycleDuration()
+                }
                 chip(title: "Livre", icon: "sparkles", isSelected: selectedKind == nil) {
                     onSelect(nil)
                 }
@@ -1013,7 +1050,13 @@ private struct FreeModeShotPickerBar: View {
         }
     }
 
-    private func chip(title: String, icon: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+    private func chip(
+        title: String,
+        icon: String,
+        isSelected: Bool,
+        accentBorder: Color? = nil,
+        action: @escaping () -> Void
+    ) -> some View {
         Button {
             selectionFeedback.selectionChanged()
             action()
@@ -1032,7 +1075,7 @@ private struct FreeModeShotPickerBar: View {
                     .fill(isSelected ? Color.yellow : Color.black.opacity(0.58))
                     .overlay(
                         Capsule(style: .continuous)
-                            .stroke(Color.white.opacity(isSelected ? 0 : 0.2), lineWidth: 1)
+                            .stroke(accentBorder ?? Color.white.opacity(isSelected ? 0 : 0.2), lineWidth: accentBorder != nil ? 1.2 : 1)
                     )
             )
         }
