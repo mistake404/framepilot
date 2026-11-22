@@ -79,15 +79,14 @@ enum ShotCoachEngine {
                     isLocked: false
                 )
             }
-        } else if !isRecording, let subject = detectedSubjectRect {
-            if subject.minX < 0.04 || subject.maxX > 0.96 || subject.minY < 0.05 || subject.maxY > 0.86 {
-                return CoachingAdvice(
-                    primaryInstruction: "Dá margem ao sujeito principal",
-                    secondaryHint: "Afasta ligeiramente ou alinha com a regra dos terços.",
-                    alignmentScore: 0.66,
-                    isLocked: false
-                )
-            }
+        }
+
+        let subjectCrowdedEdge: Bool
+        if !isRecording, detectedFaceRect == nil, let subject = detectedSubjectRect,
+           subject.width < 0.75, subject.height < 0.70 {
+            subjectCrowdedEdge = subject.minX < 0.02 || subject.maxX > 0.98 || subject.minY < 0.02 || subject.maxY > 0.92
+        } else {
+            subjectCrowdedEdge = false
         }
 
         guard let target else {
@@ -166,9 +165,12 @@ enum ShotCoachEngine {
             } else {
                 lockedTitle = "Ângulo perfeito — dispara!"
             }
+            let hint = subjectCrowdedEdge
+                ? "Dica: dá um pouco de margem ao sujeito • \(target.movementHint)"
+                : "\(target.movementHint) • \(target.directorTip)"
             return CoachingAdvice(
                 primaryInstruction: lockedTitle,
-                secondaryHint: "\(target.movementHint) • \(target.directorTip)",
+                secondaryHint: hint,
                 alignmentScore: 1.0,
                 isLocked: true
             )

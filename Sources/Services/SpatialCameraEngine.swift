@@ -2255,7 +2255,7 @@ extension SpatialCameraEngine: AVCaptureVideoDataOutputSampleBufferDelegate {
             let subjectConverted: CGRect?
             if runSaliency, faceConverted == nil,
                let box = saliencyRequest.results?.first?.salientObjects?.first?.boundingBox,
-               box.width > 0.05, box.height > 0.05 {
+               box.width > 0.08, box.height > 0.08, box.width < 0.78, box.height < 0.72 {
                 subjectConverted = CGRect(x: box.minX, y: 1.0 - box.maxY, width: box.width, height: box.height)
             } else {
                 subjectConverted = nil

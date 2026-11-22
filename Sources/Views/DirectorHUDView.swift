@@ -40,8 +40,8 @@ struct DirectorHUDView: View {
             } else if let subjectRect = telemetry.detectedSubjectRect {
                 SubjectTrackerOverlay(
                     normalizedRect: subjectRect,
-                    isGoodFraming: subjectRect.minX >= 0.04 && subjectRect.maxX <= 0.96 &&
-                        subjectRect.minY >= 0.05 && subjectRect.maxY <= 0.86
+                    isGoodFraming: subjectRect.minX >= 0.02 && subjectRect.maxX <= 0.98 &&
+                        subjectRect.minY >= 0.02 && subjectRect.maxY <= 0.92
                 )
                 .allowsHitTesting(false)
             }
